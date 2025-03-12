@@ -14,6 +14,12 @@ struct Args {
     path: PathBuf,
 }
 
+const BLUE: &str = "\x1b[94m";
+const RESET: &str = "\x1b[0m";
+const LINK_START: &str = "\x1b]8;;";
+const LINK_END: &str = "\x1b]8;;\x1b\\";
+const LINK_MID: &str = "\x1b\\";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -22,9 +28,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get the absolute path of the static content
     let static_dir = if args.path.is_relative() {
-        std::env::current_dir()?.join(&args.path)
+        std::env::current_dir()?.join(&args.path).canonicalize()?
     } else {
-        args.path.clone()
+        args.path.canonicalize()?
     };
 
     if !static_dir.exists() || !static_dir.is_dir() {
@@ -39,8 +45,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    println!("Serving static files from: {:?}", static_dir);
-    println!("Server running on localhost:{}", args.port);
+
+    println!("-----------------------------------------------");
+    println!("📂 Static content dir: {BLUE}{:?}{RESET}", static_dir);
+    println!("🌐 Server running on : {BLUE}{LINK_START}http://localhost:{0}{LINK_MID}localhost:{0}{LINK_END}{RESET}", args.port);
+    println!("-----------------------------------------------\n");
 
     axum::serve(listener, app).await?;
 
