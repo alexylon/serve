@@ -1,7 +1,7 @@
 use axum::Router;
 use clap::Parser;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 use tower_http::services::ServeDir;
 
 #[derive(Parser, Debug)]
@@ -27,11 +27,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
 
     // Get the absolute path of the static content
-    let static_dir = if args.path.is_relative() {
-        std::env::current_dir()?.join(&args.path).canonicalize()?
+    let static_dir = if args.path.is_absolute() && !args.path.exists() {
+        // If it's absolute but doesn't exist, try treating it as relative 
+        // by getting just the components after the root
+        let path_without_root = args
+            .path
+            .components()
+            .skip_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+            .collect::<PathBuf>();
+        std::env::current_dir()?.join(path_without_root)
+    } else if args.path.is_relative() {
+        std::env::current_dir()?.join(&args.path)
     } else {
-        args.path.canonicalize()?
-    };
+        args.path.clone()
+    }
+    .canonicalize()?;
 
     if !static_dir.exists() || !static_dir.is_dir() {
         return Err(format!(
@@ -45,10 +55,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-
     println!("-----------------------------------------------");
     println!("📂 Static content dir: {BLUE}{:?}{RESET}", static_dir);
-    println!("🌐 Server running on : {BLUE}{LINK_START}http://localhost:{0}{LINK_MID}localhost:{0}{LINK_END}{RESET}", args.port);
+    println!(
+        "🌐 Server running on : {BLUE}{LINK_START}http://localhost:{0}{LINK_MID}localhost:{0}{LINK_END}{RESET}",
+        args.port
+    );
     println!("-----------------------------------------------\n");
 
     axum::serve(listener, app).await?;
