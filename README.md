@@ -3,11 +3,12 @@ Serve static directory
 
 # Configuration Options
 
-| Option | Flag             | Default Value           | Description                                               |
-|--------|------------------|-------------------------|-----------------------------------------------------------|
-| Dir    | `--dir` or `-d`  | Current directory (`.`) | Specifies the directory containing static files to serve  |
-| Port   | `--port` or `-p` | `3030`                  | Specifies the port number on which the server will listen |
-| Help   | `--help` or `-h` |                         | Displays available options                                |
+| Option  | Flag                | Default Value           | Description                                                   |
+|---------|---------------------|-------------------------|---------------------------------------------------------------|
+| Dir     | `--dir` or `-d`     | Current directory (`.`) | Specifies the directory path containing static files to serve |
+| Port    | `--port` or `-p`    | `3030`                  | Specifies the port number on which the server will listen     |
+| Help    | `--help` or `-h`    |                         | Print help                                                    |
+| Version | `--version` or `-V` |                         | Print version                                                 |
 
 ## Example Usage
 
