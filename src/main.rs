@@ -11,8 +11,8 @@ struct Args {
     #[arg(short, long, default_value_t = 3030)]
     port: u16,
 
-    #[arg(short = 'P', long, default_value = ".")]
-    path: PathBuf,
+    #[arg(short, long, default_value = ".")]
+    dir: PathBuf,
 }
 
 const BLUE: &str = "\x1b[94m";
@@ -25,7 +25,7 @@ const LINK_MID: &str = "\x1b\\";
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
-    let static_dir = get_static_dir(args.path)?;
+    let static_dir = get_static_dir(args.dir)?;
 
     if !static_dir.exists() || !static_dir.is_dir() {
         return Err(format!(
