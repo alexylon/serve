@@ -24,7 +24,7 @@ const LINK_MID: &str = "\x1b\\";
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
     let static_dir = get_static_dir(args.dir)?;
 
     if !static_dir.exists() || !static_dir.is_dir() {
