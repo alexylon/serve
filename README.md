@@ -1,27 +1,28 @@
 # serve
-Serve static directory
 
-# Configuration Options
+Static file server with live reload and SPA support, built with axum.
 
-| Option  | Flag                | Default Value           | Description                                                   |
-|---------|---------------------|-------------------------|---------------------------------------------------------------|
-| Dir     | `--dir` or `-d`     | Current directory (`.`) | Specifies the directory path containing static files to serve |
-| Port    | `--port` or `-p`    | `3030`                  | Specifies the port number on which the server will listen     |
-| Help    | `--help` or `-h`    |                         | Print help                                                    |
-| Version | `--version` or `-V` |                         | Print version                                                 |
+## Features
 
-## Example Usage
+- **Compression** — gzip and Brotli response compression
+- **SPA fallback** — serves `index.html` for unmatched routes
+- **Live reload** — file watcher with debounced browser refresh
+- **Cache-Control** — immutable long-lived caching for `/assets/*`, `no-cache` for everything else
+- **Security headers** — `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`
+
+## Usage
 
 ```bash
-# Serve files from the current directory on port 3030 (default)
+# Serve current directory on port 3030
 ./serve
 
-# Serve files from a specific directory
-./serve --dir /path/to/static/directory
-
-# Serve on a different port
-./serve --port 8080
-
-# Combine options
-./serve -d /path/to/static/directory -p 8080
+# Serve a specific directory on a custom port
+./serve -d /path/to/static -p 8080
 ```
+
+## Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dir`, `-d` | `.` | Directory to serve |
+| `--port`, `-p` | `3030` | Port to listen on |

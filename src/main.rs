@@ -1,7 +1,10 @@
 use axum::Router;
+use axum::extract::Request;
+use axum::middleware;
+use axum::response::Response;
 use clap::Parser;
 use http::HeaderValue;
-use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
+use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 use std::io::Error;
 use std::net::SocketAddr;
 use std::path::{Component, PathBuf};
@@ -12,7 +15,11 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_livereload::LiveReloadLayer;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Static file server with live reload and SPA support")]
+#[command(
+    author,
+    version,
+    about = "Static file server with live reload and SPA support"
+)]
 struct Args {
     #[arg(short, long, default_value_t = 3030)]
     port: u16,
@@ -65,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .fallback_service(serve)
         .layer(livereload)
+        .layer(middleware::from_fn(cache_headers))
         .layer(CompressionLayer::new())
         .layer(SetResponseHeaderLayer::overriding(
             http::header::X_CONTENT_TYPE_OPTIONS,
@@ -75,8 +83,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             HeaderValue::from_static("SAMEORIGIN"),
         ))
         .layer(SetResponseHeaderLayer::overriding(
-            http::header::X_XSS_PROTECTION,
-            HeaderValue::from_static("1; mode=block"),
+            http::header::REFERRER_POLICY,
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
         ));
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -97,6 +105,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+async fn cache_headers(request: Request, next: middleware::Next) -> Response {
+    let path = request.uri().path().to_string();
+    let mut response = next.run(request).await;
+    let value = if path.starts_with("/assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    response
+        .headers_mut()
+        .insert(http::header::CACHE_CONTROL, HeaderValue::from_static(value));
+    response
+}
+
 fn resolve_dir(path: PathBuf) -> Result<PathBuf, Error> {
     if path.is_absolute() && !path.exists() {
         let stripped = path
@@ -107,7 +129,7 @@ fn resolve_dir(path: PathBuf) -> Result<PathBuf, Error> {
     } else if path.is_relative() {
         std::env::current_dir()?.join(&path)
     } else {
-        path.clone()
+        path
     }
     .canonicalize()
 }
