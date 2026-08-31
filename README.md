@@ -15,7 +15,8 @@ nothing is cached, and the browser refreshes when a file changes.
   for a page: a missing script or image still returns 404
 - **Security headers** — `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`
 - **Hidden files stay hidden** — anything with a dot-prefixed name, such as
-  `.env` or `.git/config`, returns 404. `.well-known` is the exception
+  `.env` or `.git/config`, returns 404, however the address is written.
+  `.well-known` is the exception
 - **Local by default** — reachable only from this machine unless you pass `--host`
 
 ## Installation
@@ -80,8 +81,9 @@ typo in a `src` attribute stays visible instead of arriving as a page of HTML.
 Changes inside `.git`, `target`, `node_modules` and other build and
 version-control directories are ignored, as are the scratch files editors write
 while you type (vim swap files, emacs autosaves, JetBrains temporary copies).
-None of those refresh the browser. Reading a file is not a change either, so
-loading a page does not make it reload itself.
+None of those refresh the browser, nor do the hidden files the server will not
+send in the first place. Reading a file is not a change either, so loading a
+page does not make it reload itself.
 
 Live reload survives a clean rebuild: if a build deletes and recreates the
 served directory, the watch is re-established.

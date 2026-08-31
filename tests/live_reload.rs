@@ -74,6 +74,33 @@ fn editor_scratch_files_are_ignored() {
 }
 
 #[test]
+fn files_that_are_never_served_do_not_refresh() {
+    // An editor writing into .idea or .vscode inside the site should not
+    // refresh the page, and neither should a change to .env.
+    let dir = site("unservable");
+    let server = Server::start(dir.path(), &[]);
+    server.settle();
+
+    let before = server.reloads();
+    dir.write(".idea/workspace.xml", "<project/>");
+    dir.write(".vscode/settings.json", "{}");
+    dir.write(".env", "API_KEY=secret");
+
+    server.expect_no_reload(before);
+}
+
+#[test]
+fn changes_the_web_can_reach_still_refresh() {
+    let dir = site("well-known");
+    let server = Server::start(dir.path(), &[]);
+    server.settle();
+
+    let before = server.reloads();
+    dir.write(".well-known/token", "public");
+    server.wait_for_reloads(before + 1);
+}
+
+#[test]
 fn changing_only_permissions_does_not_refresh() {
     let dir = site("permissions");
     let server = Server::start(dir.path(), &[]);

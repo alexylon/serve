@@ -62,24 +62,23 @@ const INDEX_FILE: &str = "index.html";
 /// The one hidden directory the web actually uses.
 const WELL_KNOWN: &str = ".well-known";
 
-/// Directories whose contents should never trigger a browser reload.
-const IGNORED_DIRS: &[&str] = &[
-    ".git",
-    ".hg",
-    ".svn",
-    "target",
-    "node_modules",
-    ".cache",
-    ".next",
-    ".svelte-kit",
-];
+/// Directories whose contents should never trigger a browser reload. Hidden
+/// ones, `.git` and `.svelte-kit` among them, are covered by [`is_hidden`].
+const IGNORED_DIRS: &[&str] = &["target", "node_modules"];
 
 /// Scratch files editors leave behind: vim swap files, backup copies.
 const IGNORED_SUFFIXES: &[&str] = &["~", ".tmp", ".swp", ".swx", ".swo"];
 
-/// vim writes `4913` to test whether a directory accepts writes; macOS
-/// leaves `.DS_Store` behind.
-const IGNORED_NAMES: &[&str] = &["4913", ".DS_Store"];
+/// vim writes `4913` to test whether a directory accepts writes.
+const IGNORED_NAMES: &[&str] = &["4913"];
+
+/// Why the watcher has to be set up again.
+enum Rewatch {
+    /// The directory was deleted or renamed away.
+    DirectoryGone,
+    /// The watcher itself failed; the directory is probably still there.
+    WatchFailed,
+}
 
 #[tokio::main]
 async fn main() {
@@ -122,7 +121,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         match result {
             Ok(events) => {
                 if events.iter().any(|event| is_watched_dir_gone(&root, event)) {
-                    let _ = rewatch.send(());
+                    let _ = rewatch.send(Rewatch::DirectoryGone);
                 }
                 if events.iter().any(|event| is_change(&root, event)) {
                     println!("  File changed, reloading...");
@@ -135,7 +134,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 for error in errors {
                     eprintln!("  Cannot watch for changes: {error}");
                 }
-                let _ = rewatch.send(());
+                let _ = rewatch.send(Rewatch::WatchFailed);
             }
         }
     })?;
@@ -147,7 +146,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let watch_root = static_dir.clone();
     let rebuilt = livereload.reloader();
     std::thread::spawn(move || {
-        while rewatch_requests.recv().is_ok() {
+        while let Ok(reason) = rewatch_requests.recv() {
             // A build can take a while between removing the directory and
             // writing the new one, so wait rather than give up.
             loop {
@@ -167,10 +166,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .watch(&watch_root, RecursiveMode::Recursive)
                     .is_ok()
                 {
-                    // The new files were written before this watch existed,
-                    // so nothing else will announce them.
-                    println!("  Directory replaced, reloading...");
-                    rebuilt.reload();
+                    // Only a replaced directory leaves the page out of date:
+                    // its files were written before this watch existed. A
+                    // watch that merely failed changed nothing.
+                    if matches!(reason, Rewatch::DirectoryGone) {
+                        println!("  Directory replaced, reloading...");
+                        rebuilt.reload();
+                    }
                     break;
                 }
             }
@@ -265,13 +267,45 @@ async fn guard_request(mut request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
-/// True for an address with a hidden segment. `%2e` is the same dot once the
-/// address is decoded, so settle that first.
+/// True for a name the server will not serve: anything hidden, apart from the
+/// one directory the web uses.
+fn is_hidden(name: &str) -> bool {
+    name.starts_with('.') && name != WELL_KNOWN
+}
+
+/// True for an address naming a hidden file. The address is decoded first:
+/// `%2e` is a dot and `%2f` a separator, and the file service reads them that
+/// way too, so a check on the raw text would miss `/sub%2f.env`.
 fn names_a_hidden_file(path: &str) -> bool {
-    path.replace("%2e", ".")
-        .replace("%2E", ".")
-        .split('/')
-        .any(|segment| segment.starts_with('.') && segment != WELL_KNOWN)
+    decode(path).split(['/', '\\']).any(is_hidden)
+}
+
+/// Turns each `%XX` into the byte it stands for, once, as the file service
+/// does.
+fn decode(path: &str) -> String {
+    let raw = path.as_bytes();
+    let mut decoded = Vec::with_capacity(raw.len());
+    let mut at = 0;
+
+    while at < raw.len() {
+        let pair = (raw.get(at + 1).and_then(hex), raw.get(at + 2).and_then(hex));
+        match (raw[at], pair) {
+            (b'%', (Some(high), Some(low))) => {
+                decoded.push(high << 4 | low);
+                at += 3;
+            }
+            _ => {
+                decoded.push(raw[at]);
+                at += 1;
+            }
+        }
+    }
+
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex(digit: &u8) -> Option<u8> {
+    (*digit as char).to_digit(16).map(|value| value as u8)
 }
 
 fn set_header(name: HeaderName, value: &'static str) -> SetResponseHeaderLayer<HeaderValue> {
@@ -334,12 +368,15 @@ fn is_ignored(root: &Path, path: &Path) -> bool {
         return false;
     };
 
-    let in_ignored_dir = relative.components().any(|component| match component {
-        Component::Normal(part) => IGNORED_DIRS.iter().any(|dir| part == *dir),
+    let unservable = relative.components().any(|component| match component {
+        Component::Normal(part) => {
+            let part = part.to_string_lossy();
+            is_hidden(&part) || IGNORED_DIRS.contains(&part.as_ref())
+        }
         _ => false,
     });
 
-    if in_ignored_dir {
+    if unservable {
         return true;
     }
 
@@ -349,7 +386,6 @@ fn is_ignored(root: &Path, path: &Path) -> bool {
 
     IGNORED_SUFFIXES.iter().any(|suffix| name.ends_with(*suffix))
         || IGNORED_NAMES.iter().any(|ignored| name == *ignored)
-        || name.starts_with(".#")                         // emacs lock file
         || (name.starts_with('#') && name.ends_with('#')) // emacs autosave copy
         || name.contains("___jb_") // JetBrains, saving through a temporary copy
 }
@@ -454,6 +490,33 @@ mod tests {
         ] {
             assert!(names_a_hidden_file(path), "{path}");
         }
+    }
+
+    #[test]
+    fn an_encoded_separator_does_not_hide_a_hidden_file() {
+        // The file service reads %2f as a separator, so this check must too.
+        for path in ["/sub%2f.env", "/sub%2F.env", "/sub%2f.git%2fconfig"] {
+            assert!(names_a_hidden_file(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn files_the_server_will_not_send_are_ignored() {
+        for path in [
+            "/site/.env",
+            "/site/.idea/workspace.xml",
+            "/site/.vscode/settings.json",
+        ] {
+            assert!(is_ignored(Path::new(ROOT), Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn changes_the_web_can_reach_are_not_ignored() {
+        assert!(!is_ignored(
+            Path::new(ROOT),
+            Path::new("/site/.well-known/token")
+        ));
     }
 
     #[test]

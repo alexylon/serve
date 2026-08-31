@@ -155,6 +155,14 @@ fn hidden_files_are_not_served() {
     // The same dot, written the long way round.
     assert_eq!(get(server.port, "/%2e%65nv").status, 404);
 
+    // And an encoded separator, which the file service reads as a real one.
+    dir.write("sub/.env", "SUB_SECRET=1");
+    dir.write("sub/.git/config", "[core]");
+    assert_eq!(get(server.port, "/sub/.env").status, 404);
+    assert_eq!(get(server.port, "/sub%2f.env").status, 404);
+    assert_eq!(get(server.port, "/sub%2F.env").status, 404);
+    assert_eq!(get(server.port, "/sub%2f.git%2fconfig").status, 404);
+
     // The one hidden directory the web actually uses.
     assert_eq!(get(server.port, "/.well-known/token").status, 200);
 }
