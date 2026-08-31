@@ -72,11 +72,12 @@ const IGNORED_SUFFIXES: &[&str] = &["~", ".tmp", ".swp", ".swx", ".swo"];
 /// vim writes `4913` to test whether a directory accepts writes.
 const IGNORED_NAMES: &[&str] = &["4913"];
 
-/// Why the watcher has to be set up again.
+/// Why the watcher has to be set up again. Both mean changes were missed;
+/// they differ only in what to call it.
 enum Rewatch {
     /// The directory was deleted or renamed away.
     DirectoryGone,
-    /// The watcher itself failed; the directory is probably still there.
+    /// The watcher itself failed, dropping whatever it had not reported.
     WatchFailed,
 }
 
@@ -166,13 +167,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .watch(&watch_root, RecursiveMode::Recursive)
                     .is_ok()
                 {
-                    // Only a replaced directory leaves the page out of date:
-                    // its files were written before this watch existed. A
-                    // watch that merely failed changed nothing.
-                    if matches!(reason, Rewatch::DirectoryGone) {
-                        println!("  Directory replaced, reloading...");
-                        rebuilt.reload();
+                    // Either way the page on screen may be out of date:
+                    // whatever was written while there was no watch went
+                    // unnoticed, and nothing else will announce it.
+                    match reason {
+                        Rewatch::DirectoryGone => {
+                            println!("  Directory replaced, reloading...")
+                        }
+                        Rewatch::WatchFailed => println!("  Watching again, reloading..."),
                     }
+                    rebuilt.reload();
                     break;
                 }
             }
@@ -273,11 +277,18 @@ fn is_hidden(name: &str) -> bool {
     name.starts_with('.') && name != WELL_KNOWN
 }
 
+/// Windows reads a backslash as a separator, so a hidden file could hide
+/// behind one there. Elsewhere it is an ordinary character in a name.
+#[cfg(windows)]
+const SEPARATORS: &[char] = &['/', '\\'];
+#[cfg(not(windows))]
+const SEPARATORS: &[char] = &['/'];
+
 /// True for an address naming a hidden file. The address is decoded first:
 /// `%2e` is a dot and `%2f` a separator, and the file service reads them that
 /// way too, so a check on the raw text would miss `/sub%2f.env`.
 fn names_a_hidden_file(path: &str) -> bool {
-    decode(path).split(['/', '\\']).any(is_hidden)
+    decode(path).split(SEPARATORS).any(is_hidden)
 }
 
 /// Turns each `%XX` into the byte it stands for, once, as the file service
@@ -498,6 +509,14 @@ mod tests {
         for path in ["/sub%2f.env", "/sub%2F.env", "/sub%2f.git%2fconfig"] {
             assert!(names_a_hidden_file(path), "{path}");
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_backslash_is_an_ordinary_character_in_a_name_here() {
+        // The file service would serve a file called `sub\.env`, so the guard
+        // must not read the backslash as a separator and refuse it.
+        assert!(!names_a_hidden_file("/sub%5c.env"));
     }
 
     #[test]
