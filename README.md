@@ -60,6 +60,16 @@ serve --host 0.0.0.0
 
 Rust 1.88 or newer.
 
+## Tests
+
+```bash
+cargo test
+```
+
+The unit tests cover the rules for which file events mean a page changed and
+which addresses are refused. The rest start the real binary on a temporary
+directory and talk HTTP to it.
+
 ## Notes
 
 Without `--spa`, an address that matches no file returns 404, as a static site

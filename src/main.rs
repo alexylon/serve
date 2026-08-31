@@ -368,3 +368,180 @@ fn resolve_dir(path: PathBuf) -> Result<PathBuf, String> {
         .canonicalize()
         .map_err(|e| format!("{}: {e}", absolute.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify_debouncer_full::notify::Event;
+    use notify_debouncer_full::notify::event::{
+        CreateKind, DataChange, MetadataKind, RemoveKind, RenameMode,
+    };
+    use std::time::Instant;
+
+    fn event(kind: EventKind, paths: &[&str]) -> DebouncedEvent {
+        let event = paths
+            .iter()
+            .fold(Event::new(kind), |event, path| event.add_path(path.into()));
+
+        DebouncedEvent::new(event, Instant::now())
+    }
+
+    fn written(paths: &[&str]) -> DebouncedEvent {
+        event(EventKind::Modify(ModifyKind::Data(DataChange::Any)), paths)
+    }
+
+    const ROOT: &str = "/site";
+
+    #[test]
+    fn build_directories_are_ignored() {
+        for path in [
+            "/site/.git/HEAD",
+            "/site/node_modules/left-pad/index.js",
+            "/site/target/debug/app",
+        ] {
+            assert!(is_ignored(Path::new(ROOT), Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn editor_scratch_files_are_ignored() {
+        for path in [
+            "/site/index.html.swp",
+            "/site/index.html~",
+            "/site/draft.tmp",
+            "/site/.#index.html",
+            "/site/#index.html#",
+            "/site/index.html___jb_tmp___",
+            "/site/4913",
+            "/site/.DS_Store",
+        ] {
+            assert!(is_ignored(Path::new(ROOT), Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn ordinary_files_are_not_ignored() {
+        for path in ["/site/index.html", "/site/assets/app.css", "/site/a~b/c.js"] {
+            assert!(!is_ignored(Path::new(ROOT), Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn only_the_part_below_the_root_is_judged() {
+        // The site itself may live inside a directory named target.
+        let root = Path::new("/project/target/site");
+        assert!(!is_ignored(root, Path::new("/project/target/site/app.css")));
+        assert!(is_ignored(root, Path::new("/project/target/site/target/x")));
+    }
+
+    #[test]
+    fn a_path_from_outside_the_root_is_left_alone() {
+        assert!(!is_ignored(
+            Path::new(ROOT),
+            Path::new("/elsewhere/app.css")
+        ));
+    }
+
+    #[test]
+    fn hidden_addresses_are_refused() {
+        for path in [
+            "/.env",
+            "/.git/config",
+            "/%2e%65nv",
+            "/%2Eenv",
+            "/js/.hidden.js",
+            "/.well-known/.secret",
+        ] {
+            assert!(names_a_hidden_file(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn ordinary_addresses_are_allowed() {
+        for path in ["/", "/index.html", "/a.b/c.js", "/.well-known/acme/token"] {
+            assert!(!names_a_hidden_file(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn reading_a_file_is_not_a_change() {
+        let read = event(
+            EventKind::Access(AccessKind::Open(AccessMode::Any)),
+            &["/site/index.html"],
+        );
+
+        assert!(!is_change(Path::new(ROOT), &read));
+    }
+
+    #[test]
+    fn a_finished_save_is_a_change() {
+        let saved = event(
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            &["/site/index.html"],
+        );
+
+        assert!(is_change(Path::new(ROOT), &saved));
+    }
+
+    #[test]
+    fn permissions_and_timestamps_are_not_changes() {
+        let touched = event(
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            &["/site/index.html"],
+        );
+
+        assert!(!is_change(Path::new(ROOT), &touched));
+    }
+
+    #[test]
+    fn writing_creating_and_deleting_are_changes() {
+        let root = Path::new(ROOT);
+        assert!(is_change(root, &written(&["/site/app.css"])));
+        assert!(is_change(
+            root,
+            &event(EventKind::Create(CreateKind::File), &["/site/new.css"])
+        ));
+        assert!(is_change(
+            root,
+            &event(EventKind::Remove(RemoveKind::File), &["/site/old.css"])
+        ));
+    }
+
+    #[test]
+    fn writing_an_ignored_file_is_not_a_change() {
+        assert!(!is_change(
+            Path::new(ROOT),
+            &written(&["/site/app.css.swp"])
+        ));
+    }
+
+    #[test]
+    fn one_real_file_among_ignored_ones_is_a_change() {
+        let mixed = written(&["/site/app.css.swp", "/site/app.css"]);
+        assert!(is_change(Path::new(ROOT), &mixed));
+    }
+
+    #[test]
+    fn notices_the_directory_being_removed_or_renamed() {
+        let root = Path::new(ROOT);
+        assert!(is_watched_dir_gone(
+            root,
+            &event(EventKind::Remove(RemoveKind::Folder), &[ROOT])
+        ));
+        assert!(is_watched_dir_gone(
+            root,
+            &event(
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+                &[ROOT]
+            )
+        ));
+    }
+
+    #[test]
+    fn a_file_going_missing_is_not_the_directory_going_missing() {
+        assert!(!is_watched_dir_gone(
+            Path::new(ROOT),
+            &event(EventKind::Remove(RemoveKind::File), &["/site/index.html"])
+        ));
+    }
+}
