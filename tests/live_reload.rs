@@ -18,8 +18,9 @@ fn saving_a_file_refreshes_the_browser() {
     let server = Server::start(dir.path(), &[]);
     server.settle();
 
+    let before = server.reloads();
     dir.write("app.css", "body { color: red }");
-    server.wait_for_reloads(1);
+    server.wait_for_reloads(before + 1);
 }
 
 #[test]
@@ -107,7 +108,8 @@ fn survives_a_build_that_replaces_the_directory() {
 #[test]
 fn survives_a_build_that_renames_the_directory_away() {
     let dir = site("rename");
-    let moved = dir.path().with_extension("old");
+    let elsewhere = TempDir::new("rename-published");
+    let moved = elsewhere.join("earlier");
     let server = Server::start(dir.path(), &[]);
     server.settle();
 
@@ -121,8 +123,6 @@ fn survives_a_build_that_renames_the_directory_away() {
     let after_rename = server.reloads();
     std::fs::write(moved.join("index.html"), "<html>stale</html>").unwrap();
     server.expect_no_reload(after_rename);
-
-    let _ = std::fs::remove_dir_all(&moved);
 }
 
 #[test]

@@ -97,9 +97,17 @@ impl Server {
         let stderr = child.stderr.take().expect("no stderr");
         collect(stderr, Arc::clone(&log), None);
 
-        let port = port
-            .recv_timeout(TIMEOUT)
-            .expect("serve never said which port it was listening on");
+        let Ok(port) = port.recv_timeout(TIMEOUT) else {
+            let stopped = match child.try_wait() {
+                Ok(Some(status)) => format!("it stopped with {status}"),
+                _ => "it is still running".to_string(),
+            };
+
+            panic!(
+                "serve never said which port it was listening on, {stopped}:\n{}",
+                log.lock().unwrap().join("\n")
+            );
+        };
 
         Server { child, port, log }
     }
@@ -179,6 +187,7 @@ fn collect(
 ) {
     std::thread::spawn(move || {
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
+            let line = visible(&line);
             let port = found_port.as_ref().zip(port_in(&line));
             log.lock().unwrap().push(line);
 
@@ -191,16 +200,53 @@ fn collect(
     });
 }
 
-/// Reads the port back out of the "Open" line of the startup banner, which is
-/// printed once the server is listening.
+/// Reads the port out of the banner's "Open" line, which is printed once the
+/// server is listening.
 fn port_in(line: &str) -> Option<u16> {
-    let after_scheme = line.find("http://")? + "http://".len();
-    let address: String = line[after_scheme..]
-        .chars()
-        .take_while(|character| !character.is_control())
-        .collect();
+    let (label, address) = line.split_once(':')?;
+    if !label.contains("Open") {
+        return None;
+    }
 
-    address.rsplit(':').next()?.parse().ok()
+    address.trim().rsplit(':').next()?.trim().parse().ok()
+}
+
+/// The text of a line without the colours and links wrapped around it, so
+/// tests read what a person would see.
+fn visible(line: &str) -> String {
+    let mut text = String::new();
+    let mut characters = line.chars();
+
+    while let Some(character) = characters.next() {
+        if character != '\x1b' {
+            text.push(character);
+            continue;
+        }
+
+        match characters.next() {
+            // A colour, ended by a letter.
+            Some('[') => {
+                for character in characters.by_ref() {
+                    if character.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            // A link, ended by ESC \\ — this drops the address it points at.
+            Some(']') => {
+                let mut escaped = false;
+                for character in characters.by_ref() {
+                    if escaped && character == '\\' {
+                        break;
+                    }
+                    escaped = character == '\x1b';
+                }
+            }
+            _ => {}
+        }
+    }
+
+    text
 }
 
 pub struct Response {
@@ -271,7 +317,8 @@ pub fn watches_for_reload(port: u16) -> std::thread::JoinHandle<bool> {
             match socket.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(read) => seen.extend_from_slice(&chunk[..read]),
-                Err(_) => continue, // the read timed out; the stream is simply quiet
+                Err(error) if would_block(&error) => continue, // simply quiet
+                Err(_) => break,                               // the connection broke
             }
             if String::from_utf8_lossy(&seen).contains("event: reload") {
                 return true;
@@ -279,6 +326,13 @@ pub fn watches_for_reload(port: u16) -> std::thread::JoinHandle<bool> {
         }
         false
     })
+}
+
+fn would_block(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
 }
 
 fn parse(raw: &[u8]) -> Response {
@@ -325,12 +379,16 @@ fn dechunk(body: &[u8]) -> Vec<u8> {
         let Ok(size) = usize::from_str_radix(size, 16) else {
             break;
         };
-        if size == 0 || end_of_size + 2 + size > rest.len() {
+        let start = end_of_size + 2;
+        let Some(chunk) = rest.get(start..start + size) else {
+            break; // the answer was cut short
+        };
+        if size == 0 {
             break;
         }
 
-        out.extend_from_slice(&rest[end_of_size + 2..end_of_size + 2 + size]);
-        rest = &rest[end_of_size + 2 + size + 2..];
+        out.extend_from_slice(chunk);
+        rest = rest.get(start + size + 2..).unwrap_or_default();
     }
 
     out

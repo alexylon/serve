@@ -61,6 +61,8 @@ fn offers_localhost_when_listening_everywhere() {
     assert_eq!(get(server.port, "/").status, 200);
 }
 
+// Only Linux binds the whole of 127.0.0.0/8 without being asked.
+#[cfg(target_os = "linux")]
 #[test]
 fn offers_the_real_address_when_it_is_not_localhost() {
     let dir = TempDir::new("other-loopback");

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Server, TempDir, get, get_page, request};
+use common::{PAGE, Server, TempDir, get, get_page, request};
 
 fn app(name: &str) -> TempDir {
     let dir = TempDir::new(name);
@@ -60,18 +60,52 @@ fn real_files_are_still_served() {
 }
 
 #[test]
-fn an_address_with_no_file_is_never_answered_from_the_index() {
-    // The index has a date and a length of its own; neither describes an
-    // address that does not exist.
+fn the_app_page_carries_none_of_the_index_files_own_details() {
+    // The index has a date and a length of its own, and neither describes the
+    // address that was asked for.
     let dir = app("conditional");
     let server = Server::start(dir.path(), &["--spa"]);
 
-    let far_future = "Thu, 01 Jan 2099 00:00:00 GMT";
+    let conditional = request(
+        server.port,
+        "GET",
+        "/users/123",
+        &[
+            ("Accept", PAGE),
+            ("If-Modified-Since", "Thu, 01 Jan 2099 00:00:00 GMT"),
+        ],
+    );
+    assert_eq!(conditional.status, 200, "a 304 would leave the page blank");
+    assert_eq!(conditional.header("last-modified"), None);
+    assert_eq!(conditional.header("etag"), None);
+    assert!(conditional.text().contains("the app"));
+
+    let ranged = request(
+        server.port,
+        "GET",
+        "/users/123",
+        &[("Accept", PAGE), ("Range", "bytes=200000-")],
+    );
+    assert_eq!(
+        ranged.status, 200,
+        "the index's length is not this address's"
+    );
+    assert_eq!(ranged.header("content-range"), None);
+}
+
+#[test]
+fn a_missing_file_stays_missing_however_it_is_asked_for() {
+    let dir = app("not-a-page");
+    let server = Server::start(dir.path(), &["--spa"]);
+
     let conditional = request(
         server.port,
         "GET",
         "/gone.js",
-        &[("If-Modified-Since", far_future)],
+        &[
+            ("Accept", "*/*"),
+            ("If-Modified-Since", "Thu, 01 Jan 2099 00:00:00 GMT"),
+        ],
     );
     assert_eq!(conditional.status, 404);
 
@@ -79,7 +113,7 @@ fn an_address_with_no_file_is_never_answered_from_the_index() {
         server.port,
         "GET",
         "/clip.mp4",
-        &[("Range", "bytes=200000-")],
+        &[("Accept", "*/*"), ("Range", "bytes=200000-")],
     );
     assert_eq!(ranged.status, 404);
 }
