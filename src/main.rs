@@ -55,7 +55,9 @@ const LABEL_WIDTH: usize = 15;
 /// refresh still feels immediate.
 const DEBOUNCE_DELAY: Duration = Duration::from_millis(200);
 
-const REWATCH_INTERVAL: Duration = Duration::from_millis(100);
+/// How often to look at the served directory to see whether it is still the
+/// one being watched, and how long to wait between attempts to watch it again.
+const CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 const INDEX_FILE: &str = "index.html";
 
@@ -75,8 +77,9 @@ const IGNORED_NAMES: &[&str] = &["4913"];
 /// Why the watcher has to be set up again. Both mean changes were missed;
 /// they differ only in what to call it.
 enum Rewatch {
-    /// The directory was deleted or renamed away.
-    DirectoryGone,
+    /// The name now leads to a different directory: a build deleted the old
+    /// one, or renamed it away.
+    Replaced,
     /// The watcher itself failed, dropping whatever it had not reported.
     WatchFailed,
 }
@@ -113,17 +116,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let livereload = LiveReloadLayer::new();
     let reloader = livereload.reloader();
 
-    // The watch follows the directory, not its name: a build that deletes and
-    // recreates it leaves the watch on something nobody can reach.
-    let (rewatch, rewatch_requests) = mpsc::channel();
+    let (failed, failures) = mpsc::channel();
 
     let root = static_dir.clone();
     let mut debouncer = new_debouncer(DEBOUNCE_DELAY, None, move |result: DebounceEventResult| {
         match result {
             Ok(events) => {
-                if events.iter().any(|event| is_watched_dir_gone(&root, event)) {
-                    let _ = rewatch.send(Rewatch::DirectoryGone);
-                }
                 if events.iter().any(|event| is_change(&root, event)) {
                     println!("  File changed, reloading...");
                     reloader.reload();
@@ -135,7 +133,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 for error in errors {
                     eprintln!("  Cannot watch for changes: {error}");
                 }
-                let _ = rewatch.send(Rewatch::WatchFailed);
+                let _ = failed.send(());
             }
         }
     })?;
@@ -147,12 +145,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let watch_root = static_dir.clone();
     let rebuilt = livereload.reloader();
     std::thread::spawn(move || {
-        while let Ok(reason) = rewatch_requests.recv() {
+        // The watch follows the directory, not its name: a build that deletes
+        // and recreates it leaves the watch on something nobody can reach.
+        // Only Linux reports that in the file events, so look at the
+        // directory itself instead.
+        let mut watched = Watched::at(&watch_root);
+
+        loop {
+            let reason = match failures.recv_timeout(CHECK_INTERVAL) {
+                Ok(()) => Rewatch::WatchFailed,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                Err(mpsc::RecvTimeoutError::Timeout) => match directory_id(&watch_root) {
+                    // Missing for the moment means a build is between
+                    // removing the directory and writing the new one.
+                    Some(now) if Some(now) != watched.as_ref().map(|it| it.id) => Rewatch::Replaced,
+                    _ => continue,
+                },
+            };
+
             // A build can take a while between removing the directory and
             // writing the new one, so wait rather than give up.
             loop {
-                std::thread::sleep(REWATCH_INTERVAL);
                 if !watch_root.is_dir() {
+                    std::thread::sleep(CHECK_INTERVAL);
                     continue;
                 }
 
@@ -163,22 +178,26 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // Let go of the old directory first: after a rename the watch
                 // is still on it, reporting changes under its new name.
                 let _ = debouncer.unwatch(&watch_root);
-                if debouncer
+                let watching_again = debouncer
                     .watch(&watch_root, RecursiveMode::Recursive)
-                    .is_ok()
-                {
+                    .is_ok();
+                drop(debouncer);
+
+                if watching_again {
+                    watched = Watched::at(&watch_root);
+
                     // Either way the page on screen may be out of date:
                     // whatever was written while there was no watch went
                     // unnoticed, and nothing else will announce it.
                     match reason {
-                        Rewatch::DirectoryGone => {
-                            println!("  Directory replaced, reloading...")
-                        }
+                        Rewatch::Replaced => println!("  Directory replaced, reloading..."),
                         Rewatch::WatchFailed => println!("  Watching again, reloading..."),
                     }
                     rebuilt.reload();
                     break;
                 }
+
+                std::thread::sleep(CHECK_INTERVAL);
             }
         }
     });
@@ -356,15 +375,58 @@ fn is_change(root: &Path, event: &DebouncedEvent) -> bool {
     written && event.paths.iter().any(|path| !is_ignored(root, path))
 }
 
-/// True when the served directory itself is gone. Builds that publish
-/// atomically rename it away: `mv dist dist.old`.
-fn is_watched_dir_gone(root: &Path, event: &DebouncedEvent) -> bool {
-    let gone = matches!(
-        event.kind,
-        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
-    );
+/// The directory the watcher is attached to.
+struct Watched {
+    /// Kept open on Unix for one reason: while a directory is open the system
+    /// cannot give its number to the next one, so a directory built in its
+    /// place always reads as different. Without this, a rebuild that lands in
+    /// the same spot on disk looks like no change at all.
+    #[cfg(unix)]
+    _open: std::fs::File,
+    id: (u64, u64),
+}
 
-    gone && event.paths.iter().any(|path| path == root)
+impl Watched {
+    #[cfg(unix)]
+    fn at(path: &Path) -> Option<Watched> {
+        let open = std::fs::File::open(path).ok()?;
+        Some(Watched {
+            _open: open,
+            id: directory_id(path)?,
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn at(path: &Path) -> Option<Watched> {
+        Some(Watched {
+            id: directory_id(path)?,
+        })
+    }
+}
+
+/// How the system knows the directory this name leads to right now.
+#[cfg(unix)]
+fn directory_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let directory = std::fs::metadata(path).ok()?;
+    Some((directory.dev(), directory.ino()))
+}
+
+#[cfg(windows)]
+fn directory_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::fs::MetadataExt;
+
+    let directory = std::fs::metadata(path).ok()?;
+    Some((
+        u64::from(directory.volume_serial_number()?),
+        directory.file_index()?,
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn directory_id(_path: &Path) -> Option<(u64, u64)> {
+    None
 }
 
 /// True for files the browser never sees: build and version-control
@@ -420,9 +482,7 @@ fn resolve_dir(path: PathBuf) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use notify_debouncer_full::notify::Event;
-    use notify_debouncer_full::notify::event::{
-        CreateKind, DataChange, MetadataKind, RemoveKind, RenameMode,
-    };
+    use notify_debouncer_full::notify::event::{CreateKind, DataChange, MetadataKind, RemoveKind};
     use std::time::Instant;
 
     fn event(kind: EventKind, paths: &[&str]) -> DebouncedEvent {
@@ -603,27 +663,30 @@ mod tests {
         assert!(is_change(Path::new(ROOT), &mixed));
     }
 
+    #[cfg(any(unix, windows))]
     #[test]
-    fn notices_the_directory_being_removed_or_renamed() {
-        let root = Path::new(ROOT);
-        assert!(is_watched_dir_gone(
-            root,
-            &event(EventKind::Remove(RemoveKind::Folder), &[ROOT])
-        ));
-        assert!(is_watched_dir_gone(
-            root,
-            &event(
-                EventKind::Modify(ModifyKind::Name(RenameMode::From)),
-                &[ROOT]
-            )
-        ));
-    }
+    fn a_new_directory_of_the_same_name_is_a_different_directory() {
+        let path = std::env::temp_dir().join(format!("serve-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
 
-    #[test]
-    fn a_file_going_missing_is_not_the_directory_going_missing() {
-        assert!(!is_watched_dir_gone(
-            Path::new(ROOT),
-            &event(EventKind::Remove(RemoveKind::File), &["/site/index.html"])
-        ));
+        let watched = Watched::at(&path).expect("could not look at the directory");
+        assert_eq!(
+            directory_id(&path),
+            Some(watched.id),
+            "the same directory read twice"
+        );
+
+        std::fs::remove_dir_all(&path).unwrap();
+        assert_eq!(directory_id(&path), None, "there is no directory to read");
+
+        std::fs::create_dir_all(&path).unwrap();
+        assert_ne!(
+            directory_id(&path),
+            Some(watched.id),
+            "a rebuilt directory read as the old one"
+        );
+
+        std::fs::remove_dir_all(&path).unwrap();
     }
 }
