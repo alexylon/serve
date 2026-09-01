@@ -100,6 +100,10 @@ fn changes_the_web_can_reach_still_refresh() {
     server.wait_for_reloads(before + 1);
 }
 
+// Linux only. macOS reports the changes to a file as one running total, so a
+// permission change arrives carrying the file's creation as well, and there is
+// no way to tell the two apart. The page refreshes once; nothing worse.
+#[cfg(target_os = "linux")]
 #[test]
 fn changing_only_permissions_does_not_refresh() {
     let dir = site("permissions");
@@ -166,12 +170,9 @@ fn keeps_serving_after_the_directory_is_replaced() {
     assert!(get(server.port, "/").text().contains("rebuilt"));
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn set_permissions(dir: &TempDir, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(dir.join("app.css"), std::fs::Permissions::from_mode(mode))
         .expect("could not change the permissions");
 }
-
-#[cfg(not(unix))]
-fn set_permissions(_dir: &TempDir, _mode: u32) {}

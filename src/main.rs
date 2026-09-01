@@ -364,7 +364,10 @@ fn is_change(root: &Path, event: &DebouncedEvent) -> bool {
     let written = match event.kind {
         EventKind::Create(_) | EventKind::Remove(_) | EventKind::Any => true,
         // The bytes did not change. Reading a file updates its access time,
-        // and treating that as a change would start the loop again.
+        // and treating that as a change would start the loop again. Only
+        // Linux says this plainly: macOS reports the changes to a file as one
+        // running total, so a permission change there can arrive looking like
+        // the file was written.
         EventKind::Modify(ModifyKind::Metadata(_)) => false,
         EventKind::Modify(_) => true,
         // A file open for writing has just been closed: a finished save.
