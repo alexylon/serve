@@ -768,6 +768,7 @@ dependencies = [
  "tokio",
  "tower-http",
  "tower-livereload",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

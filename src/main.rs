@@ -415,12 +415,29 @@ fn directory_id(path: &Path) -> Option<(u64, u64)> {
 
 #[cfg(windows)]
 fn directory_id(path: &Path) -> Option<(u64, u64)> {
-    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
+    };
 
-    let directory = std::fs::metadata(path).ok()?;
+    // Windows only opens a directory when asked for one, and the standard
+    // library has no settled way to read its number, so ask Windows directly.
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+
+    let mut about = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    // Safe: the handle is open for the whole call, and `about` is ours alone.
+    if unsafe { GetFileInformationByHandle(directory.as_raw_handle() as _, &mut about) } == 0 {
+        return None;
+    }
+
     Some((
-        u64::from(directory.volume_serial_number()?),
-        directory.file_index()?,
+        u64::from(about.dwVolumeSerialNumber),
+        u64::from(about.nFileIndexHigh) << 32 | u64::from(about.nFileIndexLow),
     ))
 }
 
