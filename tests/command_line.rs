@@ -50,11 +50,17 @@ fn a_directory_it_may_not_reach_says_so_plainly() {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
         .expect("could not close the directory");
 
-    let (said, ok) = run(&["--dir", inner.to_str().unwrap()]);
+    // Asked before running it: root reaches the directory anyway, and the
+    // server would then start and never come back.
+    let reachable = std::fs::read_dir(&inner).is_ok();
+    let said = reachable.then(String::new).unwrap_or_else(|| {
+        let (said, ok) = run(&["--dir", inner.to_str().unwrap()]);
+        assert!(!ok);
+        said
+    });
     let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
 
-    // Running as root, which reaches it anyway, leaves nothing to check.
-    if ok {
+    if reachable {
         return;
     }
 
@@ -195,5 +201,42 @@ fn a_port_the_system_will_not_give_us_says_so_plainly() {
     assert!(
         !said.contains("os error"),
         "no numbered errors, please: {said}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_it_may_not_read_says_so_plainly() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // This one can be named, so it gets past the first check and fails in the
+    // watcher instead — which used to answer with a number and a list of paths.
+    let dir = TempDir::new("closed");
+    let closed = dir.join("closed");
+    std::fs::create_dir_all(&closed).expect("could not create the directory");
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000))
+        .expect("could not close the directory");
+
+    // Asked before running it, for the reason above.
+    let readable = std::fs::read_dir(&closed).is_ok();
+    let said = readable.then(String::new).unwrap_or_else(|| {
+        let (said, ok) = run(&["--dir", closed.to_str().unwrap()]);
+        assert!(!ok);
+        said
+    });
+    let _ = std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755));
+
+    if readable {
+        return;
+    }
+
+    assert!(said.contains("will not let this program read it"), "{said}");
+    assert!(
+        !said.contains("os error"),
+        "no numbered errors, please: {said}"
+    );
+    assert!(
+        !said.contains("about ["),
+        "the watcher's own wording leaked through: {said}"
     );
 }

@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Response};
 use clap::Parser;
 use file_id::FileId;
 use http::{HeaderName, HeaderValue, StatusCode, header};
+use notify_debouncer_full::notify::ErrorKind as WatchError;
 use notify_debouncer_full::notify::event::{AccessKind, AccessMode};
 use notify_debouncer_full::notify::{EventKind, RecursiveMode, event::ModifyKind};
 use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
@@ -225,18 +226,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // Otherwise the watcher dies quietly while the banner still
                         // says reloads are on.
                         for error in errors {
-                            eprintln!("  Cannot watch for changes: {error}");
+                            eprintln!("  Cannot watch for changes: {}", cannot_watch(&error));
                         }
                         let _ = failed.send(());
                     }
                 }
-            })?;
+            })
+            .map_err(|error| cannot_watch(&error))?;
 
         // Look first, then watch. The other way round, a directory replaced
         // in between would leave the watch on the old one while the number
         // remembered is already the new one, and nothing would ever notice.
         let first_look = Watched::at(&static_dir);
-        debouncer.watch(&static_dir, RecursiveMode::Recursive)?;
+        debouncer
+            .watch(&static_dir, RecursiveMode::Recursive)
+            .map_err(|error| format!("{}: {}", static_dir.display(), cannot_watch(&error)))?;
 
         let debouncer = Arc::new(Mutex::new(debouncer));
         let watcher = Arc::clone(&debouncer);
@@ -669,6 +673,20 @@ fn is_ignored(root: &Path, path: &Path) -> bool {
 /// two ordinary answers — a typo and a directory somebody else owns — are
 /// said plainly; anything rarer keeps the system's own account, which is all
 /// there is to go on.
+/// Why the watcher could not be set up, in words. The limit is the one people
+/// actually meet: every directory below the served one costs a watch, and a
+/// project with `node_modules` in it can use them all up.
+fn cannot_watch(error: &notify_debouncer_full::notify::Error) -> String {
+    match &error.kind {
+        WatchError::MaxFilesWatch => "the system has no file watches left — serve the build \
+             output rather than the whole project, or raise the limit"
+            .to_string(),
+        WatchError::PathNotFound => "there is no such directory".to_string(),
+        WatchError::Io(io) => why(io),
+        _ => error.to_string(),
+    }
+}
+
 fn why(error: &std::io::Error) -> String {
     match error.kind() {
         ErrorKind::NotFound => "there is no such directory".to_string(),
