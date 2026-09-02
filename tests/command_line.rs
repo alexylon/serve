@@ -128,3 +128,28 @@ fn the_next_port_is_used_when_none_was_asked_for() {
     assert!(second.said("was busy"), "{}", second.lines().join("\n"));
     assert_eq!(get(second.port, "/").status, 200);
 }
+
+#[test]
+fn a_port_the_system_will_not_give_us_says_so_plainly() {
+    // Ports below 1024 need privileges on Unix, and Windows keeps whole ranges
+    // for itself. Either way the answer has to be readable.
+    let Err(refused) = std::net::TcpListener::bind(("127.0.0.1", 80)) else {
+        return; // This machine allows it, so there is nothing to test.
+    };
+    if refused.kind() != std::io::ErrorKind::PermissionDenied {
+        return; // Something is simply listening there.
+    }
+
+    let dir = TempDir::new("forbidden-port");
+    dir.write("index.html", "<html>hi</html>");
+
+    let (said, ok) = run(&["--dir", dir.path().to_str().unwrap(), "--port", "80"]);
+
+    assert!(!ok);
+    assert!(said.contains("80"), "it should say which port: {said}");
+    assert!(said.contains("--port"), "it should say what to do: {said}");
+    assert!(
+        !said.contains("os error"),
+        "no numbered errors, please: {said}"
+    );
+}

@@ -124,8 +124,13 @@ async fn listen(host: IpAddr, port: Option<u16>) -> Result<TcpListener, std::io:
     if let Some(port) = port {
         return match TcpListener::bind(SocketAddr::new(host, port)).await {
             Err(error) if error.kind() == ErrorKind::AddrInUse => {
-                Err(in_use(&format!("port {port} is already in use")))
+                Err(cannot_use(&format!("port {port} is already in use")))
             }
+            // Below 1024 on Unix, and inside the ranges Windows keeps for
+            // itself. "Permission denied" and a number help nobody.
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => Err(cannot_use(&format!(
+                "the system will not give this program port {port}"
+            ))),
             listener => listener,
         };
     }
@@ -138,7 +143,7 @@ async fn listen(host: IpAddr, port: Option<u16>) -> Result<TcpListener, std::io:
         }
     }
 
-    Err(in_use(&format!(
+    Err(cannot_use(&format!(
         "no free port between {DEFAULT_PORT} and {}",
         DEFAULT_PORT + PORTS_TO_TRY - 1
     )))
@@ -155,8 +160,8 @@ fn is_taken(error: &std::io::Error) -> bool {
     )
 }
 
-/// The one thing to do about a busy port, said once.
-fn in_use(what: &str) -> std::io::Error {
+/// The one thing to do about a port that cannot be had, said once.
+fn cannot_use(what: &str) -> std::io::Error {
     std::io::Error::other(format!("{what} — choose another one with --port"))
 }
 
