@@ -67,9 +67,10 @@ Rust 1.88 or newer.
 cargo test
 ```
 
-The unit tests cover the rules for which file events mean a page changed and
-which addresses are refused. The rest start the real binary on a temporary
-directory and talk HTTP to it.
+The unit tests cover the rules for which file events mean a page changed,
+which addresses are refused, and how one directory is told from another. The
+rest start the real binary on a temporary directory and talk HTTP to it. Every
+push runs the whole suite on Linux, macOS and Windows.
 
 ## Notes
 
@@ -85,8 +86,15 @@ None of those refresh the browser, nor do the hidden files the server will not
 send in the first place. Reading a file is not a change either, so loading a
 page does not make it reload itself.
 
-Live reload survives a clean rebuild: if a build deletes and recreates the
-served directory, the watch is re-established.
+Live reload survives a build that replaces the served directory, whether it
+deletes and recreates it or renames it away and writes a new one in its place.
+The server says so and refreshes the page, because anything written while it
+was not watching went unseen.
+
+One difference between systems: on macOS, changing a file's permissions
+refreshes the page once. macOS reports the changes to a file as a running
+total, so a permission change arrives carrying the file's creation with it and
+the two cannot be told apart. Linux and Windows stay quiet.
 
 Two things to know before pointing `--host 0.0.0.0` at a directory you care
 about. Symbolic links are followed, including ones leading outside the served
