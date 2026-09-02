@@ -36,8 +36,9 @@ Pushing the tag starts `.github/workflows/release.yml`, which builds binaries
 for Linux (x86-64 and arm64), macOS (Intel and Apple silicon) and Windows, and
 attaches them to a GitHub release.
 
-Say `patch`, `minor` or `major` — see the note in the README about which. On
-its own, `cargo release` tries to release the version already in `Cargo.toml`.
+Say `patch` for a fix, `minor` for a new flag or a new behaviour, and `major`
+for anything that changes what an existing command already does. On its own,
+`cargo release` tries to release the version already in `Cargo.toml`.
 
 ## Before you start
 
