@@ -72,8 +72,7 @@ fn no_such_address(host: IpAddr) -> anyhow::Error {
 }
 
 /// Anything the named cases do not cover. There is no plainer way to put a
-/// refusal nobody expected, so the system's own words stand, with the address
-/// they are about.
+/// refusal nobody expected, so the system's own words stand.
 fn cannot_listen(address: SocketAddr, error: &std::io::Error) -> anyhow::Error {
     anyhow!("cannot listen on {address}: {error}")
 }

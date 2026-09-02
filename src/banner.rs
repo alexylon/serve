@@ -16,7 +16,7 @@ const RULE: &str = "-----------------------------------------------";
 /// Fits the longest label, so the colons line up.
 const LABEL_WIDTH: usize = 15;
 
-pub(crate) fn print(bound: SocketAddr, args: &Args, static_dir: &Path) {
+pub(crate) fn print(bound: SocketAddr, args: &Args, static_dir: &Path, no_app_page: bool) {
     let authority = authority(bound);
     let url = format!("http://{authority}");
 
@@ -38,7 +38,7 @@ pub(crate) fn print(bound: SocketAddr, args: &Args, static_dir: &Path) {
             "off"
         },
     );
-    if args.spa && !static_dir.join(INDEX_FILE).is_file() {
+    if no_app_page {
         row(
             "Warning",
             format!("there is no {INDEX_FILE} here, so no page will load"),

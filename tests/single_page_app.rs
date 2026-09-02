@@ -144,7 +144,45 @@ fn says_so_when_there_is_no_index_to_fall_back_on() {
     assert_eq!(get_page(server.port, "/users/123").status, 404);
 
     // The banner already said it; the first request should not say it again.
+    server.settle();
     assert_eq!(server.count("no page will load"), 1, "said twice");
+}
+
+/// A page that is there but closed to this program is no more use than one
+/// that is gone, and must not read as having come back.
+#[cfg(unix)]
+#[test]
+fn a_page_that_cannot_be_read_is_reported_once_like_a_missing_one() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = app("index-unreadable");
+    let page = dir.join("index.html");
+    std::fs::set_permissions(&page, std::fs::Permissions::from_mode(0o000))
+        .expect("could not close the page");
+
+    let server = Server::start(dir.path(), &["--spa", "--no-reload"]);
+    let closed = get_page(server.port, "/users/123").status == 404;
+    if !closed {
+        // Running as root, which reads it anyway: nothing to check.
+        let _ = std::fs::set_permissions(&page, std::fs::Permissions::from_mode(0o644));
+        return;
+    }
+
+    server.wait_for_count("cannot be read", 1);
+
+    // A request some other file answers must not take this for the page
+    // coming back, or the next address would say it all over again.
+    assert_eq!(get(server.port, "/assets/app.css").status, 200);
+    assert_eq!(get_page(server.port, "/users/456").status, 404);
+
+    server.settle();
+    assert_eq!(
+        server.count("no page will load"),
+        1,
+        "said for each address"
+    );
+
+    let _ = std::fs::set_permissions(&page, std::fs::Permissions::from_mode(0o644));
 }
 
 #[test]
@@ -158,9 +196,8 @@ fn says_so_each_time_the_app_page_goes_missing() {
     server.wait_for_count("no page will load", 1);
 
     // A build clearing the directory takes the page away for a moment. That
-    // must not use up the one warning the real outage needs — and the page
-    // counts as back even though the only request in between is for a real
-    // file, which never reads it.
+    // must not use up the warning the real outage needs — and the page counts
+    // as back although the only request in between never reads it.
     dir.write("index.html", "<html>the app</html>");
     assert_eq!(get(server.port, "/assets/app.css").status, 200);
 
@@ -170,6 +207,7 @@ fn says_so_each_time_the_app_page_goes_missing() {
 
     // Still once for each time it goes, not once for each address.
     assert_eq!(get_page(server.port, "/users/789").status, 404);
+    server.settle();
     assert_eq!(
         server.count("no page will load"),
         2,

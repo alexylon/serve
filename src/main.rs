@@ -73,11 +73,16 @@ async fn run() -> Result<()> {
         watch::start(&static_dir, livereload.reloader())?;
     }
 
+    // One look, shared with the banner: two looks could disagree, and a page
+    // that went between them would be announced twice.
+    let no_app_page = args.spa && !static_dir.join(serve::INDEX_FILE).is_file();
+
     let app = serve::app(
         &static_dir,
         args.spa,
         args.cache_assets,
         (!args.no_reload).then_some(livereload),
+        no_app_page,
     );
 
     let listener = listen::listen(args.host, args.port).await?;
@@ -86,7 +91,7 @@ async fn run() -> Result<()> {
     let bound = listener
         .local_addr()
         .context("cannot tell which address the server is listening on")?;
-    banner::print(bound, &args, &static_dir);
+    banner::print(bound, &args, &static_dir, no_app_page);
 
     axum::serve(listener, app)
         .await

@@ -188,7 +188,8 @@ impl Server {
         );
     }
 
-    /// Gives the watcher a moment to settle before a test starts counting.
+    /// Gives the watcher, or whatever the last request had to say, a moment
+    /// to arrive before a test starts counting.
     pub fn settle(&self) {
         std::thread::sleep(SETTLE);
     }

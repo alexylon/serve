@@ -9,7 +9,7 @@ use http::{HeaderName, HeaderValue, StatusCode, header};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Mutex;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -33,17 +33,18 @@ pub(crate) fn app(
     spa: bool,
     cache_assets: bool,
     livereload: Option<LiveReloadLayer>,
+    no_app_page: bool,
 ) -> Router {
     let mut app = Router::new().fallback_service(ServeDir::new(static_dir));
 
     if spa {
         let index = static_dir.join(INDEX_FILE);
-        // Whether the app page is missing, as far as anyone has said out loud.
-        // Starts true when there is none: the banner is about to warn, and the
-        // first request should not say it again.
-        let unsaid = Arc::new(AtomicBool::new(!index.is_file()));
+        // Whether the app page is missing, as far as anyone has said out
+        // loud. The banner is about to warn about the same look, so the first
+        // request should not say it again.
+        let missing = Arc::new(Mutex::new(no_app_page));
         app = app.layer(middleware::from_fn(move |request, next| {
-            serve_app_shell(index.clone(), Arc::clone(&unsaid), request, next)
+            serve_app_shell(index.clone(), Arc::clone(&missing), request, next)
         }));
     }
 
@@ -81,7 +82,7 @@ pub(crate) fn app(
 /// 404, rather than HTML the browser then refuses to run.
 async fn serve_app_shell(
     index: PathBuf,
-    missing: Arc<AtomicBool>,
+    missing: Arc<Mutex<bool>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -98,33 +99,35 @@ async fn serve_app_shell(
 
     let response = next.run(request).await;
     if response.status() != StatusCode::NOT_FOUND || !wants_page || !could_be_a_route {
-        // A request some other file answered says nothing about the app page,
-        // and `/` is answered from disk without ever reading it. So while the
-        // page is thought missing, look: it may be back.
-        if missing.load(Ordering::Relaxed) && is_there(&index).await {
-            missing.store(false, Ordering::Relaxed);
+        // Another file answering says nothing about the app page, and `/` is
+        // served from disk without ever reading it. So while the page is
+        // thought missing, look: it may be back.
+        let mut missing = missing.lock().await;
+        if *missing && is_there(&index).await {
+            *missing = false;
         }
 
         return response;
     }
 
+    // Held across the read, so two requests arriving together cannot record
+    // what they found in the order they finished rather than the order they
+    // looked, leaving the page down as gone while it is there.
+    let mut missing = missing.lock().await;
     match tokio::fs::read(&index).await {
         Ok(page) => {
             // Back again, so the next time it goes is worth saying.
-            missing.store(false, Ordering::Relaxed);
+            *missing = false;
             ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response()
         }
-        // The 404 stands, but say why: the banner's check ran at startup, so
+        // The 404 stands, but say why: the banner looked only at startup, so
         // a build that clears the directory takes the page away with nobody
-        // watching, and every address in the app quietly stops working.
+        // watching.
         Err(error) => {
-            // Said once each time it goes missing, not once for each address:
-            // an app has many, and a build can clear the directory over and
-            // over. A build that makes the directory before writing the page
-            // can say this for a gap that closes itself; it was true when it
-            // was said, and the page coming back clears the way for the next
-            // time.
-            if !missing.swap(true, Ordering::Relaxed) {
+            // Once each time it goes, not once for each address. A build
+            // that makes the directory before writing the page can set this
+            // off for a gap that closes itself; it was true when it was said.
+            if !std::mem::replace(&mut *missing, true) {
                 let gone = error.kind() == ErrorKind::NotFound;
                 let reason = if gone { "is gone" } else { "cannot be read" };
                 eprintln!("  {INDEX_FILE} {reason}, so no page will load");
@@ -169,12 +172,15 @@ async fn keep_hashed_assets(request: Request, next: Next) -> Response {
     response
 }
 
-/// Whether the app page is there to be read. Only asked while it is thought
-/// missing, so a working site never pays for it.
+/// Whether the app page can be read, which is what serving it needs: one
+/// that is there but closed to this program is no more use than a missing
+/// one. Only asked while the page is thought missing.
 async fn is_there(index: &Path) -> bool {
-    tokio::fs::metadata(index)
-        .await
-        .is_ok_and(|found| found.is_file())
+    let Ok(page) = tokio::fs::File::open(index).await else {
+        return false;
+    };
+
+    page.metadata().await.is_ok_and(|found| found.is_file())
 }
 
 fn set_header(name: HeaderName, value: &'static str) -> SetResponseHeaderLayer<HeaderValue> {
