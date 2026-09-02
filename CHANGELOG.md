@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-02
+
 ### Fixed
 - With `--spa` and `--cache-assets` together, opening an address under
   `/assets/` in a browser was answered with the app page and kept for a year,
