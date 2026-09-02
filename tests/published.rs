@@ -48,6 +48,27 @@ fn a_file_that_is_not_there_is_never_kept() {
 }
 
 #[test]
+fn a_missing_asset_is_never_answered_with_the_app() {
+    // Nothing under /assets/ is a route: those names carry a hash of the
+    // file's contents. Answering with the app page there would leave the
+    // browser holding HTML at that address for a year, so the real file, once
+    // the deploy has finished, would never be asked for again.
+    let dir = site("shell");
+    let server = Server::start(dir.path(), &["--spa", "--cache-assets"]);
+
+    let response = request(
+        server.port,
+        "GET",
+        "/assets/not-copied-yet-abc123.js",
+        &[("Accept", PAGE)],
+    );
+
+    assert_eq!(response.status, 404);
+    assert!(!response.text().contains("the app"));
+    assert_eq!(response.header("cache-control"), Some("no-cache"));
+}
+
+#[test]
 fn a_refused_file_is_answered_like_anything_else() {
     let dir = site("refused");
     dir.write(".env", "API_KEY=secret");

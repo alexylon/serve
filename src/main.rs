@@ -366,8 +366,14 @@ async fn serve_app_shell(index: PathBuf, request: Request, next: Next) -> Respon
         .and_then(|accept| accept.to_str().ok())
         .is_some_and(|accept| accept.contains("text/html"));
 
+    // A name under /assets/ carries a hash of a file's contents, so it is a
+    // built file and never a route the app can answer. Handing the app back
+    // there would leave the browser holding a page at an address it was told
+    // to keep for a year, and it would never ask for the real file again.
+    let could_be_a_route = !request.uri().path().starts_with(ASSETS);
+
     let response = next.run(request).await;
-    if response.status() != StatusCode::NOT_FOUND || !wants_page {
+    if response.status() != StatusCode::NOT_FOUND || !wants_page || !could_be_a_route {
         return response;
     }
 

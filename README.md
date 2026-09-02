@@ -91,6 +91,11 @@ With `--spa`, only requests that ask for a page fall back to `index.html`; a
 missing script, stylesheet or image still returns 404, so a typo in a `src`
 attribute stays visible instead of arriving as a page of HTML.
 
+Addresses under `/assets/` never fall back, whatever asked for them. Those
+names carry a hash of the file's contents, so they name built files rather
+than routes, and answering with the app there would leave the browser holding
+a page at an address it was told to keep for a year.
+
 ## Serving a published site
 
 The defaults are for working on a site: nothing is cached and the browser
