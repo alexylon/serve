@@ -119,12 +119,12 @@ fn the_next_port_is_used_when_none_was_asked_for() {
     let dir = TempDir::new("next-port");
     dir.write("index.html", "<html>hi</html>");
 
+    // Nothing here assumes 3030 itself is free: this machine may well be
+    // running the very server that makes the second one step aside.
     let first = Server::start_choosing_a_port(dir.path());
     let second = Server::start_choosing_a_port(dir.path());
 
-    assert_ne!(first.port, second.port);
     assert_eq!(second.port, first.port + 1);
     assert!(second.said("was busy"), "{}", second.lines().join("\n"));
-    assert!(!first.said("was busy"), "{}", first.lines().join("\n"));
     assert_eq!(get(second.port, "/").status, 200);
 }

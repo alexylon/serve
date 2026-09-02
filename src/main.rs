@@ -196,6 +196,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             })?;
 
+        // Look first, then watch. The other way round, a directory replaced
+        // in between would leave the watch on the old one while the number
+        // remembered is already the new one, and nothing would ever notice.
+        let first_look = Watched::at(&static_dir);
         debouncer.watch(&static_dir, RecursiveMode::Recursive)?;
 
         let debouncer = Arc::new(Mutex::new(debouncer));
@@ -207,7 +211,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             // and recreates it leaves the watch on something nobody can reach.
             // Only Linux reports that in the file events, so look at the
             // directory itself instead.
-            let mut watched = Watched::at(&watch_root);
+            let mut watched = first_look;
 
             loop {
                 let reason = match failures.recv_timeout(CHECK_INTERVAL) {
@@ -238,13 +242,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     // Let go of the old directory first: after a rename the watch
                     // is still on it, reporting changes under its new name.
                     let _ = debouncer.unwatch(&watch_root);
+                    let looked_at = Watched::at(&watch_root);
                     let watching_again = debouncer
                         .watch(&watch_root, RecursiveMode::Recursive)
                         .is_ok();
                     drop(debouncer);
 
                     if watching_again {
-                        watched = Watched::at(&watch_root);
+                        // Looked at before watching again, for the same reason.
+                        watched = looked_at;
 
                         // Either way the page on screen may be out of date:
                         // whatever was written while there was no watch went
@@ -265,7 +271,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         app = app.layer(livereload);
     }
 
-    let mut app = app.layer(CompressionLayer::new());
+    let mut app = app
+        .layer(CompressionLayer::new())
+        // Inside the headers below, so a refusal is answered like anything else.
+        .layer(middleware::from_fn(refuse_hidden_files));
 
     if args.cache_assets {
         app = app.layer(middleware::from_fn(keep_hashed_assets));
@@ -277,7 +286,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let app = app
-        .layer(middleware::from_fn(refuse_hidden_files))
         .layer(set_header(header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
         .layer(set_header(header::X_FRAME_OPTIONS, "SAMEORIGIN"))
         .layer(set_header(
@@ -385,9 +393,14 @@ async fn keep_hashed_assets(request: Request, next: Next) -> Response {
     let hashed = request.uri().path().starts_with(ASSETS);
     let mut response = next.run(request).await;
 
+    // Only what was actually sent. A file that was missing during a deploy
+    // would otherwise be remembered as missing for a year, and a name that
+    // carries a hash never changes, so nothing would ever ask for it again.
+    let keep = hashed && response.status().is_success();
+
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(if hashed { KEEP_FOR_A_YEAR } else { "no-cache" }),
+        HeaderValue::from_static(if keep { KEEP_FOR_A_YEAR } else { "no-cache" }),
     );
 
     response

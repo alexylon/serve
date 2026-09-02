@@ -34,6 +34,32 @@ fn hashed_assets_are_kept_and_everything_else_is_checked() {
 }
 
 #[test]
+fn a_file_that_is_not_there_is_never_kept() {
+    // A deploy can be caught halfway, with the page asking for a file that has
+    // not been copied yet. Keeping that answer for a year would mean the file
+    // is never asked for again on that browser, and the name carries a hash so
+    // it never changes.
+    let dir = site("missing");
+    let server = Server::start(dir.path(), &["--cache-assets"]);
+
+    let response = get(server.port, "/assets/not-copied-yet-abc123.js");
+    assert_eq!(response.status, 404);
+    assert_eq!(response.header("cache-control"), Some("no-cache"));
+}
+
+#[test]
+fn a_refused_file_is_answered_like_anything_else() {
+    let dir = site("refused");
+    dir.write(".env", "API_KEY=secret");
+    let server = Server::start(dir.path(), &["--cache-assets"]);
+
+    let response = get(server.port, "/.env");
+    assert_eq!(response.status, 404);
+    assert_eq!(response.header("cache-control"), Some("no-cache"));
+    assert_eq!(response.header("x-content-type-options"), Some("nosniff"));
+}
+
+#[test]
 fn a_browser_that_already_has_the_file_is_told_so() {
     // Without this, "check each time" would still send the whole file back.
     let dir = site("revalidate");

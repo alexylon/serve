@@ -149,7 +149,13 @@ fn hidden_files_are_not_served() {
 
     let server = Server::start(dir.path(), &[]);
 
-    assert_eq!(get(server.port, "/.env").status, 404);
+    let refused = get(server.port, "/.env");
+    assert_eq!(refused.status, 404);
+    assert_eq!(
+        refused.header("cache-control"),
+        Some("no-store"),
+        "a refusal is answered like anything else"
+    );
     assert_eq!(get(server.port, "/.git/config").status, 404);
 
     // The same dot, written the long way round.
