@@ -102,9 +102,8 @@ policy. Other files are revalidated so visitors still receive updated pages.
 When exposing servio to a network, serve only the intended build directory.
 Hidden paths are blocked apart from `.well-known`, which certificate renewal
 needs, and symlinks may point only within the served directory. Each
-subdirectory also uses a file watch while live reload is on,
-so serving a large project tree can exhaust the operating system's watch
-limit.
+subdirectory also uses a file watch while live reload is on, so serving a large
+project tree can exhaust the operating system's watch limit.
 
 ## Development
 
