@@ -132,15 +132,26 @@ async fn listen(host: IpAddr, port: Option<u16>) -> Result<TcpListener, std::io:
     for port in DEFAULT_PORT..DEFAULT_PORT + PORTS_TO_TRY {
         match TcpListener::bind(SocketAddr::new(host, port)).await {
             Ok(listener) => return Ok(listener),
-            Err(error) if error.kind() == ErrorKind::AddrInUse => continue,
+            Err(error) if is_taken(&error) => continue,
             Err(error) => return Err(error),
         }
     }
 
     Err(in_use(&format!(
-        "ports {DEFAULT_PORT} to {} are all in use",
+        "no free port between {DEFAULT_PORT} and {}",
         DEFAULT_PORT + PORTS_TO_TRY - 1
     )))
+}
+
+/// True when this port belongs to someone else and the next one is worth a
+/// try. Windows keeps whole ranges of ports for itself — Hyper-V and WSL
+/// reserve them, and Docker Desktop brings both — and it refuses those as
+/// forbidden rather than taken.
+fn is_taken(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::AddrInUse | ErrorKind::PermissionDenied
+    )
 }
 
 /// The one thing to do about a busy port, said once.
@@ -797,6 +808,18 @@ mod tests {
     fn one_real_file_among_ignored_ones_is_a_change() {
         let mixed = written(&["/site/app.css.swp", "/site/app.css"]);
         assert!(is_change(Path::new(ROOT), &mixed));
+    }
+
+    #[test]
+    fn a_port_the_system_keeps_is_stepped_past_like_a_busy_one() {
+        // Windows refuses its reserved ranges as forbidden rather than taken,
+        // and either way the next port is worth a try.
+        assert!(is_taken(&ErrorKind::AddrInUse.into()));
+        assert!(is_taken(&ErrorKind::PermissionDenied.into()));
+
+        // Not a port that is spoken for: this address does not exist here, and
+        // trying the next port would not help.
+        assert!(!is_taken(&ErrorKind::AddrNotAvailable.into()));
     }
 
     #[cfg(any(unix, windows))]
