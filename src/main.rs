@@ -3,6 +3,7 @@ use axum::extract::Request;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use clap::Parser;
+use file_id::FileId;
 use http::{HeaderName, HeaderValue, StatusCode, header};
 use notify_debouncer_full::notify::event::{AccessKind, AccessMode};
 use notify_debouncer_full::notify::{EventKind, RecursiveMode, event::ModifyKind};
@@ -513,7 +514,7 @@ struct Watched {
     /// the same spot on disk looks like no change at all.
     #[cfg(unix)]
     _open: std::fs::File,
-    id: (u64, u64),
+    id: FileId,
 }
 
 impl Watched {
@@ -535,45 +536,8 @@ impl Watched {
 }
 
 /// How the system knows the directory this name leads to right now.
-#[cfg(unix)]
-fn directory_id(path: &Path) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-
-    let directory = std::fs::metadata(path).ok()?;
-    Some((directory.dev(), directory.ino()))
-}
-
-#[cfg(windows)]
-fn directory_id(path: &Path) -> Option<(u64, u64)> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
-    };
-
-    // Windows only opens a directory when asked for one, and the standard
-    // library has no settled way to read its number, so ask Windows directly.
-    let directory = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)
-        .ok()?;
-
-    let mut about = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
-    // Safe: the handle is open for the whole call, and `about` is ours alone.
-    if unsafe { GetFileInformationByHandle(directory.as_raw_handle() as _, &mut about) } == 0 {
-        return None;
-    }
-
-    Some((
-        u64::from(about.dwVolumeSerialNumber),
-        u64::from(about.nFileIndexHigh) << 32 | u64::from(about.nFileIndexLow),
-    ))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn directory_id(_path: &Path) -> Option<(u64, u64)> {
-    None
+fn directory_id(path: &Path) -> Option<FileId> {
+    file_id::get_file_id(path).ok()
 }
 
 /// True for files the browser never sees: build and version-control

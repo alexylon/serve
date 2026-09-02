@@ -26,10 +26,8 @@ clap = { version = "4", features = ["derive"] }
 tower-livereload = "0.10"
 notify-debouncer-full = "0.5"
 http = "1"
-
-# Only for telling one directory from another; see `directory_id`.
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+# Tells one directory from another; notify already builds it.
+file-id = "0.2"
 
 [profile.release]
 lto = true
