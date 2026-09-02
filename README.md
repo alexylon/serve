@@ -78,8 +78,8 @@ a page does not make it reload itself.
 
 Live reload survives a build that replaces the served directory, whether it
 deletes and recreates it or renames it away and writes a new one in its place.
-The server says so and refreshes the page, because anything written while it
-was not watching went unseen.
+The server says so once and refreshes the page, because anything written while
+it was not watching went unseen.
 
 On macOS, changing a file's permissions refreshes the page once. macOS reports
 the changes to a file as a running total, so a permission change arrives

@@ -157,6 +157,32 @@ fn survives_a_build_that_renames_the_directory_away() {
 }
 
 #[test]
+fn a_rebuild_is_announced_once() {
+    // The watcher sees the old files go away and the check sees the new
+    // directory, but that is one rebuild and reads better as one line.
+    let dir = site("announced-once");
+    let server = Server::start(dir.path(), &[]);
+    server.settle();
+
+    dir.remove_all();
+    dir.create();
+    dir.write("index.html", "<html>rebuilt</html>");
+    server.wait_for("Directory replaced");
+    server.settle();
+
+    assert_eq!(
+        server.count("File changed"),
+        0,
+        "the rebuild was announced twice:\n{}",
+        server.lines().join("\n")
+    );
+
+    // What must not be lost: editing after a rebuild still says so.
+    dir.write("index.html", "<html>edited</html>");
+    server.wait_for("File changed");
+}
+
+#[test]
 fn keeps_serving_after_the_directory_is_replaced() {
     let dir = site("still-serving");
     let server = Server::start(dir.path(), &[]);

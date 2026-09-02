@@ -14,7 +14,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
@@ -76,6 +76,10 @@ const DEBOUNCE_DELAY: Duration = Duration::from_millis(200);
 /// How often to look at the served directory to see whether it is still the
 /// one being watched, and how long to wait between attempts to watch it again.
 const CHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How long the watcher's account of a rebuild goes on arriving after the
+/// rebuild itself was announced: one debounce, plus a look at the directory.
+const SAME_REBUILD: Duration = Duration::from_millis(300);
 
 const INDEX_FILE: &str = "index.html";
 
@@ -192,13 +196,28 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         let (failed, failures) = mpsc::channel();
 
+        // When a rebuild was last announced. The check below notices the new
+        // directory within one look, while the watcher's account of the same
+        // rebuild — the old files going away — waits out the debounce first.
+        // So the announcement comes first, and this is what lets the watcher
+        // recognise the echo of it.
+        let announced = Arc::new(Mutex::new(None::<Instant>));
+
         let root = static_dir.clone();
+        let same_rebuild = Arc::clone(&announced);
         let mut debouncer =
             new_debouncer(DEBOUNCE_DELAY, None, move |result: DebounceEventResult| {
                 match result {
                     Ok(events) => {
                         if events.iter().any(|event| is_change(&root, event)) {
-                            println!("  File changed, reloading...");
+                            // Quiet when a rebuild has just been announced: these
+                            // events are that same rebuild, and one rebuild
+                            // deserves one line. The page is refreshed either
+                            // way, so at worst this costs a line, never a
+                            // refresh.
+                            if !just_announced(&same_rebuild) {
+                                println!("  File changed, reloading...");
+                            }
                             reloader.reload();
                         }
                     }
@@ -273,7 +292,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // whatever was written while there was no watch went
                         // unnoticed, and nothing else will announce it.
                         match reason {
-                            Rewatch::Replaced => println!("  Directory replaced, reloading..."),
+                            Rewatch::Replaced => {
+                                if let Ok(mut at) = announced.lock() {
+                                    *at = Some(Instant::now());
+                                }
+                                println!("  Directory replaced, reloading...");
+                            }
                             Rewatch::WatchFailed => println!("  Watching again, reloading..."),
                         }
                         rebuilt.reload();
@@ -589,6 +613,16 @@ fn directory_id(path: &Path) -> Option<FileId> {
     file_id::get_file_id(path).ok()
 }
 
+/// True when a rebuild was announced a moment ago, so what the watcher is
+/// reporting now is that same rebuild reaching it the slower way.
+fn just_announced(at: &Mutex<Option<Instant>>) -> bool {
+    let Ok(at) = at.lock() else {
+        return false;
+    };
+
+    at.is_some_and(|when| when.elapsed() < SAME_REBUILD)
+}
+
 /// True for files the browser never sees: build and version-control
 /// directories, and the scratch files editors write while you type.
 ///
@@ -643,7 +677,6 @@ mod tests {
     use super::*;
     use notify_debouncer_full::notify::Event;
     use notify_debouncer_full::notify::event::{CreateKind, DataChange, MetadataKind, RemoveKind};
-    use std::time::Instant;
 
     fn event(kind: EventKind, paths: &[&str]) -> DebouncedEvent {
         let event = paths
