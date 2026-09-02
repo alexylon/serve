@@ -4,8 +4,19 @@ version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"   # let-chains
 description = "HTTP server for static files, with live reload, for local development"
+authors = ["Alexander Alexandrov"]
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/alexylon/servio"
+documentation = "https://docs.rs/servio"
+keywords = ["http", "server", "static-files", "live-reload", "dev-server"]
+categories = ["command-line-utilities", "web-programming::http-server", "development-tools"]
+publish = true
+exclude = [".github/"]
+
+[[bin]]
+name = "servio"
+path = "src/main.rs"
 
 [dependencies]
 axum = "0.8"
