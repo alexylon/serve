@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+- With `--spa` and `--cache-assets` together, opening an address under
+  `/assets/` in a browser was answered with the app page and kept for a year,
+  so the real file was never asked for again
+- A hashed file the browser already had was told to check on every visit from
+  then on, undoing what `--cache-assets` had asked for
+- A port the system will not give out, such as one below 1024, was reported as
+  a numbered error instead of being explained
+
 ## [0.5.1] - 2026-09-02
 
 ### Added
