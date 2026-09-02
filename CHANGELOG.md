@@ -10,6 +10,13 @@
   then on, undoing what `--cache-assets` had asked for
 - A port the system will not give out, such as one below 1024, was reported as
   a numbered error instead of being explained
+- A rebuild was announced twice, once by the watcher and once by the check that
+  notices the new directory
+- A burst of watcher failures set the watch up again once for each of them
+
+### Changed
+- A symbolic link leading out of the served directory is refused, so a link
+  left in a build cannot hand out the rest of the disk
 
 ## [0.5.1] - 2026-09-02
 
