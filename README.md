@@ -8,7 +8,8 @@ development: nothing is cached, and the browser refreshes when a file changes.
 - **Live reload** — the browser refreshes when you save a file (it waits 200 ms,
   so one save is one refresh)
 - **Nothing is cached** — every response says `Cache-Control: no-store`, so the
-  browser always shows your latest edit
+  browser always shows your latest edit. `--cache-assets` turns this around for
+  a published site
 - **Compression** — gzip and Brotli
 - **Single-page apps** — with `--spa`, an address that matches no file serves
   `index.html`, so the app can handle its own links
@@ -55,6 +56,8 @@ servio --host 0.0.0.0
 | `--port`, `-p` | `3030` | Port to listen on |
 | `--host` | `127.0.0.1` | Address to listen on |
 | `--spa` | off | Serve `index.html` when the address matches no file |
+| `--no-reload` | off | Do not watch for changes, and do not refresh the browser |
+| `--cache-assets` | off | Let the browser keep files under `/assets/` for a year |
 
 ## What refreshes the page, and what does not
 
@@ -82,6 +85,22 @@ Without `--spa`, they return 404, as a static site should.
 With `--spa`, only requests that ask for a page fall back to `index.html`; a
 missing script, stylesheet or image still returns 404, so a typo in a `src`
 attribute stays visible instead of arriving as a page of HTML.
+
+## Serving a published site
+
+The defaults are for working on a site: nothing is cached and the browser
+refreshes itself. Two flags turn that off for a site you are publishing.
+
+```bash
+servio --dir site_public --host 0.0.0.0 --spa --no-reload --cache-assets
+```
+
+`--no-reload` stops the watching and leaves the page alone: no script is added
+and no connection is held open. `--cache-assets` tells the browser to keep
+files under `/assets/` for a year, since a build gives those names a hash of
+their contents and the file at such an address never changes. Everything else
+is checked on each visit, so a new page is never missed, and a browser that
+already has the file is told so instead of being sent it again.
 
 ## Before you open it to the network
 

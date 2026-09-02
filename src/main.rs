@@ -40,6 +40,14 @@ struct Args {
     /// Serve index.html when the address matches no file, for single-page apps
     #[arg(long)]
     spa: bool,
+
+    /// Do not watch for changes, and do not refresh the browser
+    #[arg(long)]
+    no_reload: bool,
+
+    /// Let the browser keep files under /assets/ for a year, for a published site
+    #[arg(long)]
+    cache_assets: bool,
 }
 
 const BLUE: &str = "\x1b[94m";
@@ -63,6 +71,13 @@ const INDEX_FILE: &str = "index.html";
 
 /// The one hidden directory the web actually uses.
 const WELL_KNOWN: &str = ".well-known";
+
+/// Where a build puts files whose name changes with their contents, so the
+/// browser can keep them for as long as it likes.
+const ASSETS: &str = "/assets/";
+
+/// A year, the longest any browser is asked to keep a file.
+const KEEP_FOR_A_YEAR: &str = "public, max-age=31536000, immutable";
 
 /// Directories whose contents should never trigger a browser reload. Hidden
 /// ones, `.git` and `.svelte-kit` among them, are covered by [`is_hidden`].
@@ -114,100 +129,115 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let livereload = LiveReloadLayer::new();
-    let reloader = livereload.reloader();
 
-    let (failed, failures) = mpsc::channel();
+    if !args.no_reload {
+        let reloader = livereload.reloader();
 
-    let root = static_dir.clone();
-    let mut debouncer = new_debouncer(DEBOUNCE_DELAY, None, move |result: DebounceEventResult| {
-        match result {
-            Ok(events) => {
-                if events.iter().any(|event| is_change(&root, event)) {
-                    println!("  File changed, reloading...");
-                    reloader.reload();
+        let (failed, failures) = mpsc::channel();
+
+        let root = static_dir.clone();
+        let mut debouncer =
+            new_debouncer(DEBOUNCE_DELAY, None, move |result: DebounceEventResult| {
+                match result {
+                    Ok(events) => {
+                        if events.iter().any(|event| is_change(&root, event)) {
+                            println!("  File changed, reloading...");
+                            reloader.reload();
+                        }
+                    }
+                    Err(errors) => {
+                        // Otherwise the watcher dies quietly while the banner still
+                        // says reloads are on.
+                        for error in errors {
+                            eprintln!("  Cannot watch for changes: {error}");
+                        }
+                        let _ = failed.send(());
+                    }
                 }
-            }
-            Err(errors) => {
-                // Otherwise the watcher dies quietly while the banner still
-                // says reloads are on.
-                for error in errors {
-                    eprintln!("  Cannot watch for changes: {error}");
-                }
-                let _ = failed.send(());
-            }
-        }
-    })?;
+            })?;
 
-    debouncer.watch(&static_dir, RecursiveMode::Recursive)?;
+        debouncer.watch(&static_dir, RecursiveMode::Recursive)?;
 
-    let debouncer = Arc::new(Mutex::new(debouncer));
-    let watching = Arc::clone(&debouncer);
-    let watch_root = static_dir.clone();
-    let rebuilt = livereload.reloader();
-    std::thread::spawn(move || {
-        // The watch follows the directory, not its name: a build that deletes
-        // and recreates it leaves the watch on something nobody can reach.
-        // Only Linux reports that in the file events, so look at the
-        // directory itself instead.
-        let mut watched = Watched::at(&watch_root);
+        let debouncer = Arc::new(Mutex::new(debouncer));
+        let watcher = Arc::clone(&debouncer);
+        let watch_root = static_dir.clone();
+        let rebuilt = livereload.reloader();
+        std::thread::spawn(move || {
+            // The watch follows the directory, not its name: a build that deletes
+            // and recreates it leaves the watch on something nobody can reach.
+            // Only Linux reports that in the file events, so look at the
+            // directory itself instead.
+            let mut watched = Watched::at(&watch_root);
 
-        loop {
-            let reason = match failures.recv_timeout(CHECK_INTERVAL) {
-                Ok(()) => Rewatch::WatchFailed,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                Err(mpsc::RecvTimeoutError::Timeout) => match directory_id(&watch_root) {
-                    // Missing for the moment means a build is between
-                    // removing the directory and writing the new one.
-                    Some(now) if Some(now) != watched.as_ref().map(|it| it.id) => Rewatch::Replaced,
-                    _ => continue,
-                },
-            };
-
-            // A build can take a while between removing the directory and
-            // writing the new one, so wait rather than give up.
             loop {
-                if !watch_root.is_dir() {
-                    std::thread::sleep(CHECK_INTERVAL);
-                    continue;
-                }
-
-                let Ok(mut debouncer) = watching.lock() else {
-                    return;
+                let reason = match failures.recv_timeout(CHECK_INTERVAL) {
+                    Ok(()) => Rewatch::WatchFailed,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(mpsc::RecvTimeoutError::Timeout) => match directory_id(&watch_root) {
+                        // Missing for the moment means a build is between
+                        // removing the directory and writing the new one.
+                        Some(now) if Some(now) != watched.as_ref().map(|it| it.id) => {
+                            Rewatch::Replaced
+                        }
+                        _ => continue,
+                    },
                 };
 
-                // Let go of the old directory first: after a rename the watch
-                // is still on it, reporting changes under its new name.
-                let _ = debouncer.unwatch(&watch_root);
-                let watching_again = debouncer
-                    .watch(&watch_root, RecursiveMode::Recursive)
-                    .is_ok();
-                drop(debouncer);
-
-                if watching_again {
-                    watched = Watched::at(&watch_root);
-
-                    // Either way the page on screen may be out of date:
-                    // whatever was written while there was no watch went
-                    // unnoticed, and nothing else will announce it.
-                    match reason {
-                        Rewatch::Replaced => println!("  Directory replaced, reloading..."),
-                        Rewatch::WatchFailed => println!("  Watching again, reloading..."),
+                // A build can take a while between removing the directory and
+                // writing the new one, so wait rather than give up.
+                loop {
+                    if !watch_root.is_dir() {
+                        std::thread::sleep(CHECK_INTERVAL);
+                        continue;
                     }
-                    rebuilt.reload();
-                    break;
-                }
 
-                std::thread::sleep(CHECK_INTERVAL);
+                    let Ok(mut debouncer) = watcher.lock() else {
+                        return;
+                    };
+
+                    // Let go of the old directory first: after a rename the watch
+                    // is still on it, reporting changes under its new name.
+                    let _ = debouncer.unwatch(&watch_root);
+                    let watching_again = debouncer
+                        .watch(&watch_root, RecursiveMode::Recursive)
+                        .is_ok();
+                    drop(debouncer);
+
+                    if watching_again {
+                        watched = Watched::at(&watch_root);
+
+                        // Either way the page on screen may be out of date:
+                        // whatever was written while there was no watch went
+                        // unnoticed, and nothing else will announce it.
+                        match reason {
+                            Rewatch::Replaced => println!("  Directory replaced, reloading..."),
+                            Rewatch::WatchFailed => println!("  Watching again, reloading..."),
+                        }
+                        rebuilt.reload();
+                        break;
+                    }
+
+                    std::thread::sleep(CHECK_INTERVAL);
+                }
             }
-        }
-    });
+        });
+
+        app = app.layer(livereload);
+    }
+
+    let mut app = app.layer(CompressionLayer::new());
+
+    if args.cache_assets {
+        app = app.layer(middleware::from_fn(keep_hashed_assets));
+    } else {
+        // Never let the browser hold on to a stale file.
+        app = app
+            .layer(middleware::from_fn(always_answer_in_full))
+            .layer(set_header(header::CACHE_CONTROL, "no-store"));
+    }
 
     let app = app
-        .layer(livereload)
-        .layer(CompressionLayer::new())
-        .layer(middleware::from_fn(guard_request))
-        // Never let the browser hold on to a stale file.
-        .layer(set_header(header::CACHE_CONTROL, "no-store"))
+        .layer(middleware::from_fn(refuse_hidden_files))
         .layer(set_header(header::X_CONTENT_TYPE_OPTIONS, "nosniff"))
         .layer(set_header(header::X_FRAME_OPTIONS, "SAMEORIGIN"))
         .layer(set_header(
@@ -236,8 +266,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("{RULE}");
     banner_row("Serving", static_dir.display());
-    banner_row("Live reload", "on");
+    banner_row("Live reload", on_off(!args.no_reload));
     banner_row("Single-page app", on_off(args.spa));
+    banner_row(
+        "Caching",
+        if args.cache_assets {
+            "files under /assets/ for a year"
+        } else {
+            "off"
+        },
+    );
     if args.spa && !index.is_file() {
         banner_row(
             "Warning",
@@ -273,21 +311,40 @@ async fn serve_app_shell(index: PathBuf, request: Request, next: Next) -> Respon
     }
 }
 
-async fn guard_request(mut request: Request, next: Next) -> Response {
+async fn refuse_hidden_files(request: Request, next: Next) -> Response {
     // Otherwise `servio --host 0.0.0.0` in a project directory hands `.env`
     // and `.git/config` to anyone on the network.
     if names_a_hidden_file(request.uri().path()) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    // The browser is asking because something was just saved, so "nothing has
-    // changed" is never the right answer. Range requests are left alone, so
-    // seeking in audio and video still works.
+    next.run(request).await
+}
+
+/// While you are working, the browser only asks whether a file changed because
+/// you just saved it, so "nothing has changed" is never the right answer.
+/// Range requests are left alone, so seeking in audio and video still works.
+async fn always_answer_in_full(mut request: Request, next: Next) -> Response {
     let headers = request.headers_mut();
     headers.remove(header::IF_MODIFIED_SINCE);
     headers.remove(header::IF_NONE_MATCH);
 
     next.run(request).await
+}
+
+/// What a published site tells the browser to keep. Names under `/assets/`
+/// carry a hash of their contents, so the file at one of those addresses never
+/// changes and the browser can keep it. Everything else is checked each time.
+async fn keep_hashed_assets(request: Request, next: Next) -> Response {
+    let hashed = request.uri().path().starts_with(ASSETS);
+    let mut response = next.run(request).await;
+
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(if hashed { KEEP_FOR_A_YEAR } else { "no-cache" }),
+    );
+
+    response
 }
 
 /// True for a name the server will not serve: anything hidden, apart from the
