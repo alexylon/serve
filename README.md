@@ -1,8 +1,8 @@
 # servio
 
-A small static-file server with live reload, built with Axum. It is designed
-for local development: files are not cached, and the browser refreshes when
-they change.
+An HTTP server for static files, with live reload, built with Axum. It is
+designed for local development: files are not cached, and the browser refreshes
+when they change.
 
 ## Features
 
@@ -18,6 +18,12 @@ they change.
 ## Install
 
 Rust 1.88 or newer is required.
+
+```bash
+cargo install servio
+```
+
+To install the latest development version:
 
 ```bash
 cargo install --git https://github.com/alexylon/servio
@@ -94,8 +100,9 @@ servio --dir site_public --host 0.0.0.0 --spa --no-reload --cache-assets
 policy. Other files are revalidated so visitors still receive updated pages.
 
 When exposing servio to a network, serve only the intended build directory.
-Hidden paths are blocked, and symlinks may point only within the served
-directory. Each subdirectory also uses a file watch while live reload is on,
+Hidden paths are blocked apart from `.well-known`, which certificate renewal
+needs, and symlinks may point only within the served directory. Each
+subdirectory also uses a file watch while live reload is on,
 so serving a large project tree can exhaust the operating system's watch
 limit.
 
