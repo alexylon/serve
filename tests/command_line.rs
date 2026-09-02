@@ -124,7 +124,14 @@ fn the_next_port_is_used_when_none_was_asked_for() {
     let first = Server::start_choosing_a_port(dir.path());
     let second = Server::start_choosing_a_port(dir.path());
 
-    assert_eq!(second.port, first.port + 1);
+    // Higher, not exactly one higher: anything else on this machine may hold
+    // the port in between, and stepping past that is the point.
+    assert!(
+        second.port > first.port,
+        "the second server should have stepped up from {}, not taken {}",
+        first.port,
+        second.port
+    );
     assert!(second.said("was busy"), "{}", second.lines().join("\n"));
     assert_eq!(get(second.port, "/").status, 200);
 }
