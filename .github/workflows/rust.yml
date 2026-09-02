@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: ["**"]
 
+# Nothing here writes to the repository; only the release workflow does.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
