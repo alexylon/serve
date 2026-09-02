@@ -288,10 +288,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         app = app.layer(livereload);
     }
 
+    let root = static_dir.clone();
     let mut app = app
         .layer(CompressionLayer::new())
         // Inside the headers below, so a refusal is answered like anything else.
-        .layer(middleware::from_fn(refuse_hidden_files));
+        .layer(middleware::from_fn(refuse_hidden_files))
+        .layer(middleware::from_fn(move |request, next| {
+            refuse_paths_outside(root.clone(), request, next)
+        }));
 
     if args.cache_assets {
         app = app.layer(middleware::from_fn(keep_hashed_assets));
@@ -385,6 +389,35 @@ async fn serve_app_shell(index: PathBuf, request: Request, next: Next) -> Respon
     match tokio::fs::read(&index).await {
         Ok(page) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response(),
         Err(_) => response,
+    }
+}
+
+async fn refuse_paths_outside(root: PathBuf, request: Request, next: Next) -> Response {
+    // A link inside the directory can point anywhere on the disk, and the file
+    // service follows it. Serving a directory with one in it would otherwise
+    // hand out whatever it leads to, `/etc/passwd` included.
+    if !leads_inside(&root, request.uri().path()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    next.run(request).await
+}
+
+/// True when the address leads to something inside the served directory, or to
+/// nothing at all — the file service says so itself, and answering here would
+/// only tell a stranger which names exist.
+///
+/// Where a name leads is a question only the system can answer, since a link
+/// can be added between one request and the next. That is one look at the
+/// disk, taken here rather than handed to a thread of its own: the handoff
+/// costs more than the look, and the file service is about to take several.
+fn leads_inside(root: &Path, path: &str) -> bool {
+    let decoded = decode(path);
+    let relative = decoded.trim_start_matches(SEPARATORS);
+
+    match root.join(relative).canonicalize() {
+        Ok(resolved) => resolved.starts_with(root),
+        Err(_) => true,
     }
 }
 

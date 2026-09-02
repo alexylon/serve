@@ -172,3 +172,45 @@ fn hidden_files_are_not_served() {
     // The one hidden directory the web actually uses.
     assert_eq!(get(server.port, "/.well-known/token").status, 200);
 }
+
+/// Windows needs privileges to make one, so these are for the rest.
+#[cfg(unix)]
+mod links {
+    use super::common::{Server, TempDir, get};
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn a_link_leading_out_of_the_served_directory_is_refused() {
+        // Otherwise `servio --host 0.0.0.0` in a directory with one link in it
+        // hands out whatever that link leads to.
+        let dir = TempDir::new("link-out");
+        let elsewhere = TempDir::new("link-target");
+        dir.write("index.html", "<html>hi</html>");
+        elsewhere.write("private.txt", "SECRET");
+
+        symlink(elsewhere.path(), dir.join("out")).expect("could not make the link");
+        symlink(elsewhere.join("private.txt"), dir.join("private.txt"))
+            .expect("could not make the link");
+
+        let server = Server::start(dir.path(), &[]);
+
+        assert_eq!(get(server.port, "/out/private.txt").status, 404);
+        assert_eq!(get(server.port, "/private.txt").status, 404);
+        assert_eq!(get(server.port, "/out%2Fprivate.txt").status, 404);
+    }
+
+    #[test]
+    fn a_link_inside_the_served_directory_still_works() {
+        // Only leaving is refused. A site may well link one of its own files.
+        let dir = TempDir::new("link-in");
+        dir.write("index.html", "<html>hi</html>");
+        dir.write("real/app.css", "body {}");
+
+        symlink(dir.join("real"), dir.join("linked")).expect("could not make the link");
+
+        let server = Server::start(dir.path(), &[]);
+
+        assert_eq!(get(server.port, "/linked/app.css").status, 200);
+        assert_eq!(get(server.port, "/linked/app.css").text(), "body {}");
+    }
+}

@@ -17,6 +17,9 @@ development: nothing is cached, and the browser refreshes when a file changes.
 - **Hidden files stay hidden** — anything with a dot-prefixed name, such as
   `.env` or `.git/config`, returns 404, however the address is written.
   `.well-known` is the exception
+- **Nothing outside the directory** — a symbolic link leading out of the
+  served directory returns 404, so a link left in a build cannot hand out the
+  rest of the disk
 - **Local by default** — reachable only from this machine unless you pass `--host`
 
 ## Installation
@@ -114,9 +117,10 @@ already has the file is told so instead of being sent it again.
 
 ## Before you open it to the network
 
-Two things to know before pointing `--host 0.0.0.0` at a directory you care
-about. Symbolic links are followed, including ones leading outside the served
-directory. And every subdirectory costs one file-watch, so serving a tree with
+Symbolic links are followed inside the served directory, and refused where
+they lead out of it: a link to `/etc/passwd` returns 404 rather than the file.
+One thing is still worth knowing before pointing `--host 0.0.0.0` at a large
+directory: every subdirectory costs one file-watch, so serving a tree with
 `node_modules` in it can exhaust the system limit — serve the build output
 rather than the project root.
 
