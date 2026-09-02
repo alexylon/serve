@@ -411,10 +411,15 @@ async fn keep_hashed_assets(request: Request, next: Next) -> Response {
     let hashed = request.uri().path().starts_with(ASSETS);
     let mut response = next.run(request).await;
 
-    // Only what was actually sent. A file that was missing during a deploy
-    // would otherwise be remembered as missing for a year, and a name that
-    // carries a hash never changes, so nothing would ever ask for it again.
-    let keep = hashed && response.status().is_success();
+    // Only a file that is really there. One missing during a deploy would
+    // otherwise be remembered as missing for a year, and a name that carries
+    // a hash never changes, so nothing would ever ask for it again.
+    //
+    // "You already have it" counts: a browser takes the headers on that answer
+    // as the file's own, so leaving the year out would quietly turn the file
+    // back into one checked on every visit.
+    let there = response.status().is_success() || response.status() == StatusCode::NOT_MODIFIED;
+    let keep = hashed && there;
 
     response.headers_mut().insert(
         header::CACHE_CONTROL,

@@ -100,6 +100,14 @@ fn a_browser_that_already_has_the_file_is_told_so() {
 
     assert_eq!(response.status, 304);
     assert!(response.body.is_empty());
+
+    // A browser takes the headers on this answer as the file's own, replacing
+    // the ones it stored. Leave the year off and one check turns the file back
+    // into one checked on every visit.
+    assert_eq!(
+        response.header("cache-control"),
+        Some("public, max-age=31536000, immutable")
+    );
 }
 
 #[test]
