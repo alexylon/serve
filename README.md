@@ -1,4 +1,4 @@
-# serve
+# servio
 
 Static file server with live reload, built with axum. Made for local development:
 nothing is cached, and the browser refreshes when a file changes.
@@ -22,13 +22,13 @@ nothing is cached, and the browser refreshes when a file changes.
 ## Installation
 
 ```bash
-cargo install --git https://github.com/alexylon/serve
+cargo install --git https://github.com/alexylon/servio
 ```
 
 Or build from a clone:
 
 ```bash
-git clone https://github.com/alexylon/serve && cd serve
+git clone https://github.com/alexylon/servio && cd servio
 cargo install --path .
 ```
 
@@ -36,16 +36,16 @@ cargo install --path .
 
 ```bash
 # Serve current directory on port 3030
-serve
+servio
 
 # Serve a specific directory on a custom port
-serve -d /path/to/static -p 8080
+servio -d /path/to/static -p 8080
 
 # Single-page app: an address like /users/123 serves index.html
-serve --spa
+servio --spa
 
 # Reach the server from another device (phone, tablet, VM)
-serve --host 0.0.0.0
+servio --host 0.0.0.0
 ```
 
 ## Options

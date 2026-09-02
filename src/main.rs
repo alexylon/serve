@@ -87,7 +87,7 @@ enum Rewatch {
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("serve: {error}");
+        eprintln!("servio: {error}");
         std::process::exit(1);
     }
 }
@@ -274,7 +274,7 @@ async fn serve_app_shell(index: PathBuf, request: Request, next: Next) -> Respon
 }
 
 async fn guard_request(mut request: Request, next: Next) -> Response {
-    // Otherwise `serve --host 0.0.0.0` in a project directory hands `.env`
+    // Otherwise `servio --host 0.0.0.0` in a project directory hands `.env`
     // and `.git/config` to anyone on the network.
     if names_a_hidden_file(request.uri().path()) {
         return StatusCode::NOT_FOUND.into_response();
@@ -686,7 +686,7 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn a_new_directory_of_the_same_name_is_a_different_directory() {
-        let path = std::env::temp_dir().join(format!("serve-id-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("servio-id-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
 

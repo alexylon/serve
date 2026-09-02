@@ -6,10 +6,10 @@ use common::{Server, TempDir, get};
 use std::process::Command;
 
 fn run(args: &[&str]) -> (String, bool) {
-    let output = Command::new(env!("CARGO_BIN_EXE_serve"))
+    let output = Command::new(env!("CARGO_BIN_EXE_servio"))
         .args(args)
         .output()
-        .expect("could not run serve");
+        .expect("could not run servio");
 
     let said = String::from_utf8_lossy(&output.stdout).into_owned()
         + &String::from_utf8_lossy(&output.stderr);

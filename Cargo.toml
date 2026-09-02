@@ -1,11 +1,11 @@
 [package]
-name = "serve"
+name = "servio"
 version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"   # let-chains
 description = "Static file server with live reload for local development"
 license = "MIT"
-repository = "https://github.com/alexylon/serve"
+repository = "https://github.com/alexylon/servio"
 
 [dependencies]
 axum = "0.8"

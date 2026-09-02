@@ -29,7 +29,7 @@ impl TempDir {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
         let path =
-            std::env::temp_dir().join(format!("serve-test-{}-{name}-{unique}", std::process::id()));
+            std::env::temp_dir().join(format!("servio-test-{}-{name}-{unique}", std::process::id()));
 
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("could not create the test directory");
@@ -77,7 +77,7 @@ impl Server {
     /// Starts the server on a port the system chooses, and waits until it is
     /// listening. Everything it prints is collected for the assertions below.
     pub fn start(dir: &Path, args: &[&str]) -> Server {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_serve"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_servio"))
             .arg("--dir")
             .arg(dir)
             .arg("--port")
@@ -86,7 +86,7 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("could not start serve");
+            .expect("could not start servio");
 
         let log = Arc::new(Mutex::new(Vec::new()));
         let (found_port, port) = mpsc::channel();
@@ -104,7 +104,7 @@ impl Server {
             };
 
             panic!(
-                "serve never said which port it was listening on, {stopped}:\n{}",
+                "servio never said which port it was listening on, {stopped}:\n{}",
                 log.lock().unwrap().join("\n")
             );
         };
