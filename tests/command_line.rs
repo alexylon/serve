@@ -3,18 +3,50 @@
 mod common;
 
 use common::{Server, TempDir, get};
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
+/// How long to let servio run before deciding it started rather than stopped.
+const STARTS_WITHIN: Duration = Duration::from_secs(5);
+
+/// Runs servio and returns what it said, and whether it is still standing.
+///
+/// A server that starts does not exit, so waiting for it to finish would wait
+/// for ever. Systems disagree about what is refusable — a directory that
+/// cannot be read stops the watcher on Linux and does not on macOS — so it is
+/// stopped here and reported as running, and the test decides what that means.
 fn run(args: &[&str]) -> (String, bool) {
-    let output = Command::new(env!("CARGO_BIN_EXE_servio"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_servio"))
         .args(args)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("could not run servio");
 
-    let said = String::from_utf8_lossy(&output.stdout).into_owned()
-        + &String::from_utf8_lossy(&output.stderr);
+    let deadline = Instant::now() + STARTS_WITHIN;
+    let running = loop {
+        match child.try_wait().expect("could not wait for servio") {
+            Some(status) => break status.success(),
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break true;
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
 
-    (said, output.status.success())
+    // The pipes are at their end now, so this cannot block either.
+    let mut said = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut said);
+    }
+    if let Some(mut errors) = child.stderr.take() {
+        let _ = errors.read_to_string(&mut said);
+    }
+
+    (said, running)
 }
 
 #[test]
@@ -50,17 +82,11 @@ fn a_directory_it_may_not_reach_says_so_plainly() {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
         .expect("could not close the directory");
 
-    // Asked before running it: root reaches the directory anyway, and the
-    // server would then start and never come back.
-    let reachable = std::fs::read_dir(&inner).is_ok();
-    let said = reachable.then(String::new).unwrap_or_else(|| {
-        let (said, ok) = run(&["--dir", inner.to_str().unwrap()]);
-        assert!(!ok);
-        said
-    });
+    let (said, still_running) = run(&["--dir", inner.to_str().unwrap()]);
     let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
 
-    if reachable {
+    // Running as root, or on a system that reaches it anyway: nothing to check.
+    if still_running {
         return;
     }
 
@@ -217,16 +243,12 @@ fn a_directory_it_may_not_read_says_so_plainly() {
     std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000))
         .expect("could not close the directory");
 
-    // Asked before running it, for the reason above.
-    let readable = std::fs::read_dir(&closed).is_ok();
-    let said = readable.then(String::new).unwrap_or_else(|| {
-        let (said, ok) = run(&["--dir", closed.to_str().unwrap()]);
-        assert!(!ok);
-        said
-    });
+    let (said, still_running) = run(&["--dir", closed.to_str().unwrap()]);
     let _ = std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755));
 
-    if readable {
+    // macOS watches a directory it cannot read, and root reads it outright.
+    // Where the watcher does refuse, it has to say so in words.
+    if still_running {
         return;
     }
 
@@ -239,4 +261,25 @@ fn a_directory_it_may_not_read_says_so_plainly() {
         !said.contains("about ["),
         "the watcher's own wording leaked through: {said}"
     );
+}
+
+#[test]
+fn a_server_that_starts_is_not_waited_on_for_ever() {
+    // The macOS build hung here once. A directory Linux refuses to watch is
+    // watched happily there, so servio stayed up, and a helper that waited for
+    // it to exit waited until the job was killed twenty minutes later. No test
+    // may depend on servio choosing to stop.
+    let dir = TempDir::new("stays-up");
+    dir.write("index.html", "<html>hi</html>");
+
+    let began = Instant::now();
+    let (said, still_running) = run(&["--dir", dir.path().to_str().unwrap(), "--port", "0"]);
+
+    assert!(still_running, "servio should have stayed up: {said}");
+    assert!(
+        began.elapsed() < STARTS_WITHIN * 3,
+        "waited {:?}, which is not a bound at all",
+        began.elapsed()
+    );
+    assert!(said.contains("Serving"), "no banner: {said}");
 }

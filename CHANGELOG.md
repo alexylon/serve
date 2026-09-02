@@ -17,6 +17,11 @@
   numbered error, the way a busy port used to be. Running out of file watches
   now says so, and says what to do about it
 
+### Changed
+- With `--spa`, an address under `/assets/` no longer falls back to the app
+  page: those names carry a hash of a file's contents, so one that is missing
+  is missing, and a typo in a build stays visible
+
 ### Security
 - A symbolic link leading out of the served directory is refused, so a link
   left in a build cannot hand out the rest of the disk

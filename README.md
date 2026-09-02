@@ -1,148 +1,114 @@
 # servio
 
-HTTP server for static files, with live reload, built with axum. Made for local
-development: nothing is cached, and the browser refreshes when a file changes.
+A small static-file server with live reload, built with Axum. It is designed
+for local development: files are not cached, and the browser refreshes when
+they change.
 
 ## Features
 
-- **Live reload** — the browser refreshes when you save a file (it waits 200 ms,
-  so one save is one refresh)
-- **Nothing is cached** — every response says `Cache-Control: no-store`, so the
-  browser always shows your latest edit. `--cache-assets` turns this around for
-  a published site
-- **Compression** — gzip and Brotli
-- **Single-page apps** — with `--spa`, an address that matches no file serves
-  `index.html`, so the app can handle its own links
-- **Security headers** — `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`
-- **Hidden files stay hidden** — anything with a dot-prefixed name, such as
-  `.env` or `.git/config`, returns 404, however the address is written.
-  `.well-known` is the exception
-- **Nothing outside the directory** — a symbolic link leading out of the
-  served directory returns 404, so a link left in a build cannot hand out the
-  rest of the disk
-- **Local by default** — reachable only from this machine unless you pass `--host`
+- Live reload, debounced by 200 ms
+- Gzip and Brotli compression
+- Single-page app (SPA) fallback
+- Optional long-term caching for published assets
+- Safe defaults: localhost only, no caching, hidden files blocked
+- Protection against serving files through symlinks outside the chosen directory
+- Security headers including `X-Content-Type-Options`, `X-Frame-Options`, and
+  `Referrer-Policy`
 
-## Installation
+## Install
+
+Rust 1.88 or newer is required.
 
 ```bash
 cargo install --git https://github.com/alexylon/servio
 ```
 
-Or build from a clone:
+To install from a local clone:
 
 ```bash
-git clone https://github.com/alexylon/servio && cd servio
+git clone https://github.com/alexylon/servio
+cd servio
 cargo install --path .
 ```
 
-## Usage
+## Quick start
+
+Run `servio` in the directory you want to serve, then open the address shown
+in the terminal.
 
 ```bash
-# Serve current directory on port 3030
+# Serve the current directory at http://127.0.0.1:3030
 servio
 
-# Serve a specific directory on a custom port
-servio -d /path/to/static -p 8080
+# Serve another directory on port 8080
+servio --dir /path/to/static --port 8080
 
-# Single-page app: an address like /users/123 serves index.html
+# Fall back to index.html for SPA routes such as /users/123
 servio --spa
 
-# Reach the server from another device (phone, tablet, VM)
+# Make the server reachable from other devices on your network
 servio --host 0.0.0.0
 ```
 
 ## Options
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dir`, `-d` | `.` | Directory to serve |
-| `--port`, `-p` | `3030` | Port to listen on, or the next free one |
-| `--host` | `127.0.0.1` | Address to listen on |
-| `--spa` | off | Serve `index.html` when the address matches no file |
-| `--no-reload` | off | Do not watch for changes, and do not refresh the browser |
-| `--cache-assets` | off | Let the browser keep files under `/assets/` for a year |
+| Option | Default | Description |
+| --- | --- | --- |
+| `-d, --dir <DIR>` | `.` | Directory to serve |
+| `-p, --port <PORT>` | `3030` | Port to use |
+| `--host <HOST>` | `127.0.0.1` | Address to listen on |
+| `--spa` | off | Serve `index.html` when a page route matches no file |
+| `--no-reload` | off | Disable file watching and browser refreshes |
+| `--cache-assets` | off | Cache files under `/assets/` for one year |
 
-If you say nothing about the port and 3030 is busy, the next free one is used
-and the banner says so, so a server left running in another window is not in
-your way. Ask for a port and you get that one or an error: something else
-expects that number, and moving quietly would only puzzle you later.
+If you do not specify a port and 3030 is busy, servio tries the next available
+port through 3039 and prints the selected address. If you specify a port,
+servio uses that exact port or exits with an error.
 
-## What refreshes the page, and what does not
+## Live reload
 
-Saving a file refreshes the browser. Changes inside `.git`, `target`,
-`node_modules` and other build and version-control directories do not, nor do
-the scratch files editors write while you type (vim swap files, emacs
-autosaves, JetBrains temporary copies), nor the hidden files the server will
-not send in the first place. Reading a file is not a change either, so loading
-a page does not make it reload itself.
+Saving a file refreshes the browser. servio ignores changes in hidden
+directories, `target`, `node_modules`, and common editor temporary files.
 
-Live reload survives a build that replaces the served directory, whether it
-deletes and recreates it or renames it away and writes a new one in its place.
-The server says so once and refreshes the page, because anything written while
-it was not watching went unseen.
+Live reload continues working when a build replaces the served directory. On
+macOS, changing file permissions may also trigger one refresh because of how
+the operating system reports file events.
 
-On macOS, changing a file's permissions refreshes the page once. macOS reports
-the changes to a file as a running total, so a permission change arrives
-carrying the file's creation with it and the two cannot be told apart. Linux
-and Windows stay quiet.
+## Single-page apps
 
-## Addresses that match no file
+With `--spa`, missing page routes fall back to `index.html` so the client-side
+router can handle them. Missing scripts, stylesheets, images, and anything
+under `/assets/` still return 404, making broken asset paths easy to spot.
 
-Without `--spa`, they return 404, as a static site should.
-
-With `--spa`, only requests that ask for a page fall back to `index.html`; a
-missing script, stylesheet or image still returns 404, so a typo in a `src`
-attribute stays visible instead of arriving as a page of HTML.
-
-Addresses under `/assets/` never fall back, whatever asked for them. Those
-names carry a hash of the file's contents, so they name built files rather
-than routes, and answering with the app there would leave the browser holding
-a page at an address it was told to keep for a year.
+Without `--spa`, every missing path returns 404.
 
 ## Serving a published site
 
-The defaults are for working on a site: nothing is cached and the browser
-refreshes itself. Two flags turn that off for a site you are publishing.
+Disable live reload and enable caching for content-hashed assets:
 
 ```bash
 servio --dir site_public --host 0.0.0.0 --spa --no-reload --cache-assets
 ```
 
-`--no-reload` stops the watching and leaves the page alone: no script is added
-and no connection is held open. `--cache-assets` tells the browser to keep
-files under `/assets/` for a year, since a build gives those names a hash of
-their contents and the file at such an address never changes. Everything else
-is checked on each visit, so a new page is never missed, and a browser that
-already has the file is told so instead of being sent it again.
+`--cache-assets` gives files under `/assets/` a one-year immutable cache
+policy. Other files are revalidated so visitors still receive updated pages.
 
-## Before you open it to the network
+When exposing servio to a network, serve only the intended build directory.
+Hidden paths are blocked, and symlinks may point only within the served
+directory. Each subdirectory also uses a file watch while live reload is on,
+so serving a large project tree can exhaust the operating system's watch
+limit.
 
-Symbolic links are followed inside the served directory, and refused where
-they lead out of it: a link to `/etc/passwd` returns 404 rather than the file.
-One thing is still worth knowing before pointing `--host 0.0.0.0` at a large
-directory: every subdirectory costs one file-watch, so serving a tree with
-`node_modules` in it can exhaust the system limit — serve the build output
-rather than the project root.
+## Development
 
-## Requirements
-
-Rust 1.88 or newer.
-
-## Tests
+Run the test suite with:
 
 ```bash
 cargo test
 ```
 
-The unit tests cover the rules for which file events mean a page changed,
-which addresses are refused, and how one directory is told from another. The
-rest start the real binary on a temporary directory and talk HTTP to it. Every
-push runs the whole suite on Linux, macOS and Windows.
-
-## Changes
-
-What changed in each version is in [CHANGELOG.md](CHANGELOG.md). How a release
-is made is in [RELEASE.md](RELEASE.md).
+See [CHANGELOG.md](CHANGELOG.md) for version history and
+[RELEASE.md](RELEASE.md) for the release process.
 
 ## License
 
