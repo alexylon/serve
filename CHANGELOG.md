@@ -14,7 +14,7 @@
   notices the new directory
 - A burst of watcher failures set the watch up again once for each of them
 
-### Changed
+### Security
 - A symbolic link leading out of the served directory is refused, so a link
   left in a build cannot hand out the rest of the disk
 

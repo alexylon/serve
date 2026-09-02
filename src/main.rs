@@ -278,6 +278,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     // Let go of the old directory first: after a rename the watch
                     // is still on it, reporting changes under its new name.
                     let _ = debouncer.unwatch(&watch_root);
+
+                    // Anything waiting now is about the watcher just taken off,
+                    // and one recovery answers all of it. Drained here, before
+                    // the new watch exists: a failure of that one has to be left
+                    // alone to ask for a recovery of its own, or the watcher
+                    // dies while the banner still says reloads are on.
+                    while failures.try_recv().is_ok() {}
+
                     let looked_at = Watched::at(&watch_root);
                     let watching_again = debouncer
                         .watch(&watch_root, RecursiveMode::Recursive)
@@ -287,10 +295,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if watching_again {
                         // Looked at before watching again, for the same reason.
                         watched = looked_at;
-
-                        // Anything queued behind this is about the watcher just
-                        // replaced, so it needs no second recovery.
-                        while failures.try_recv().is_ok() {}
 
                         // Either way the page on screen may be out of date:
                         // whatever was written while there was no watch went
