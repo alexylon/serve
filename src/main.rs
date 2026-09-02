@@ -288,6 +288,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // Looked at before watching again, for the same reason.
                         watched = looked_at;
 
+                        // Anything queued behind this is about the watcher just
+                        // replaced, so it needs no second recovery.
+                        while failures.try_recv().is_ok() {}
+
                         // Either way the page on screen may be out of date:
                         // whatever was written while there was no watch went
                         // unnoticed, and nothing else will announce it.
