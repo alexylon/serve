@@ -1,0 +1,27 @@
+# cargo-release: version bump, changelog stamp, tag, publish, push.
+# Reference: https://rust-lang.github.io/cargo-release/
+
+pre-release-commit-message = "Release {{version}}"
+
+tag-name = "v{{version}}"
+tag-message = "Release {{version}}"
+
+publish = true
+
+push = true
+push-remote = "origin"
+
+consolidate-commits = false
+
+# Build and test the packaged crate before it goes out.
+verify = true
+
+# Move whatever is under Unreleased into a section for this version.
+[[pre-release-replacements]]
+file = "CHANGELOG.md"
+search = "(?m)^## \\[Unreleased\\]\\n\\n"
+replace = """## [Unreleased]
+
+## [{{version}}] - {{date}}
+
+"""

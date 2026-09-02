@@ -130,6 +130,11 @@ which addresses are refused, and how one directory is told from another. The
 rest start the real binary on a temporary directory and talk HTTP to it. Every
 push runs the whole suite on Linux, macOS and Windows.
 
+## Changes
+
+What changed in each version is in [CHANGELOG.md](CHANGELOG.md). How a release
+is made is in [RELEASE.md](RELEASE.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
