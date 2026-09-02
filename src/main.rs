@@ -665,6 +665,18 @@ fn is_ignored(root: &Path, path: &Path) -> bool {
         || name.contains("___jb_") // JetBrains, saving through a temporary copy
 }
 
+/// Why a directory could not be reached, in words rather than a number. The
+/// two ordinary answers — a typo and a directory somebody else owns — are
+/// said plainly; anything rarer keeps the system's own account, which is all
+/// there is to go on.
+fn why(error: &std::io::Error) -> String {
+    match error.kind() {
+        ErrorKind::NotFound => "there is no such directory".to_string(),
+        ErrorKind::PermissionDenied => "the system will not let this program read it".to_string(),
+        _ => error.to_string(),
+    }
+}
+
 fn resolve_dir(path: PathBuf) -> Result<PathBuf, String> {
     let absolute = if path.is_relative() {
         std::env::current_dir()
@@ -677,7 +689,7 @@ fn resolve_dir(path: PathBuf) -> Result<PathBuf, String> {
     // Name the path: this is what a typo shows you.
     absolute
         .canonicalize()
-        .map_err(|e| format!("{}: {e}", absolute.display()))
+        .map_err(|error| format!("{}: {}", absolute.display(), why(&error)))
 }
 
 #[cfg(test)]

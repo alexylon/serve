@@ -13,6 +13,8 @@
 - A rebuild was announced twice, once by the watcher and once by the check that
   notices the new directory
 - A burst of watcher failures set the watch up again once for each of them
+- A directory that could not be reached was reported as a numbered error, the
+  way a busy port used to be
 
 ### Security
 - A symbolic link leading out of the served directory is refused, so a link

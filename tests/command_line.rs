@@ -26,6 +26,43 @@ fn a_directory_that_does_not_exist_names_itself() {
         said.contains("/definitely/not/here"),
         "the message should say which path failed: {said}"
     );
+    assert!(
+        said.contains("no such directory"),
+        "it should say what is wrong in words: {said}"
+    );
+    assert!(
+        !said.contains("os error"),
+        "no numbered errors, please: {said}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_it_may_not_reach_says_so_plainly() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Closed at the parent: the name below it cannot even be looked up. Closing
+    // the directory itself would not do, since it can still be named.
+    let dir = TempDir::new("unreachable");
+    let inner = dir.join("locked/inner");
+    std::fs::create_dir_all(&inner).expect("could not create the directory");
+    let locked = dir.join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("could not close the directory");
+
+    let (said, ok) = run(&["--dir", inner.to_str().unwrap()]);
+    let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+
+    // Running as root, which reaches it anyway, leaves nothing to check.
+    if ok {
+        return;
+    }
+
+    assert!(said.contains("will not let this program read it"), "{said}");
+    assert!(
+        !said.contains("os error"),
+        "no numbered errors, please: {said}"
+    );
 }
 
 #[test]
