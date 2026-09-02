@@ -142,4 +142,37 @@ fn says_so_when_there_is_no_index_to_fall_back_on() {
 
     assert!(server.said("Warning"));
     assert_eq!(get_page(server.port, "/users/123").status, 404);
+
+    // The banner already said it; the first request should not say it again.
+    assert_eq!(server.count("no page will load"), 1, "said twice");
+}
+
+#[test]
+fn says_so_each_time_the_app_page_goes_missing() {
+    let dir = app("index-comes-and-goes");
+    let server = Server::start(dir.path(), &["--spa", "--no-reload"]);
+    let page = dir.join("index.html");
+
+    std::fs::remove_file(&page).expect("could not remove the page");
+    assert_eq!(get_page(server.port, "/users/123").status, 404);
+    server.wait_for_count("no page will load", 1);
+
+    // A build clearing the directory takes the page away for a moment. That
+    // must not use up the one warning the real outage needs — and the page
+    // counts as back even though the only request in between is for a real
+    // file, which never reads it.
+    dir.write("index.html", "<html>the app</html>");
+    assert_eq!(get(server.port, "/assets/app.css").status, 200);
+
+    std::fs::remove_file(&page).expect("could not remove the page");
+    assert_eq!(get_page(server.port, "/users/456").status, 404);
+    server.wait_for_count("no page will load", 2);
+
+    // Still once for each time it goes, not once for each address.
+    assert_eq!(get_page(server.port, "/users/789").status, 404);
+    assert_eq!(
+        server.count("no page will load"),
+        2,
+        "said for each address"
+    );
 }

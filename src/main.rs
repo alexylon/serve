@@ -1,13 +1,16 @@
 mod banner;
+mod errors;
 mod guard;
 mod listen;
 mod serve;
 mod watch;
 
+use crate::errors::cannot_reach;
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use tower_livereload::LiveReloadLayer;
 
 #[derive(Parser, Debug)]
@@ -43,20 +46,26 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() {
-    if let Err(error) = run().await {
-        eprintln!("servio: {error}");
-        std::process::exit(1);
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            errors::report(&error);
+            ExitCode::FAILURE
+        }
     }
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<()> {
     let args = Args::parse();
     let static_dir = resolve_dir(&args.dir)?;
 
     // A missing path already failed in resolve_dir; this catches a file.
     if !static_dir.is_dir() {
-        return Err(format!("{} is not a directory", static_dir.display()).into());
+        bail!(
+            "cannot serve {}: it is not a directory",
+            static_dir.display()
+        );
     }
 
     let livereload = LiveReloadLayer::new();
@@ -74,17 +83,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listener = listen::listen(args.host, args.port).await?;
 
     // With `--port 0` the system picks the port, so ask the listener.
-    banner::print(listener.local_addr()?, &args, &static_dir);
+    let bound = listener
+        .local_addr()
+        .context("cannot tell which address the server is listening on")?;
+    banner::print(bound, &args, &static_dir);
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .await
+        .context("the server stopped")?;
 
     Ok(())
 }
 
-fn resolve_dir(path: &Path) -> Result<PathBuf, String> {
+fn resolve_dir(path: &Path) -> Result<PathBuf> {
     let absolute = if path.is_relative() {
         std::env::current_dir()
-            .map_err(|e| format!("cannot read the current directory: {e}"))?
+            .map_err(|error| cannot_reach("cannot read the current directory".to_string(), &error))?
             .join(path)
     } else {
         path.to_path_buf()
@@ -93,15 +107,5 @@ fn resolve_dir(path: &Path) -> Result<PathBuf, String> {
     // Name the path, so a typo shows.
     absolute
         .canonicalize()
-        .map_err(|error| format!("{}: {}", absolute.display(), why(&error)))
-}
-
-/// Why a directory could not be reached, in plain words. The two common
-/// cases are named; anything rarer keeps the system's own message.
-pub(crate) fn why(error: &std::io::Error) -> String {
-    match error.kind() {
-        ErrorKind::NotFound => "there is no such directory".to_string(),
-        ErrorKind::PermissionDenied => "the system will not let this program read it".to_string(),
-        _ => error.to_string(),
-    }
+        .map_err(|error| cannot_reach(format!("cannot serve {}", absolute.display()), &error))
 }

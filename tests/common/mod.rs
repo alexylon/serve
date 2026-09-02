@@ -153,6 +153,17 @@ impl Server {
         self.wait_until(|| self.said(needle), needle);
     }
 
+    /// For something said more than once, where waiting for the first would
+    /// return straight away.
+    pub fn wait_for_count(&self, needle: &str, wanted: usize) {
+        // No count here: this message is built before the waiting starts, so
+        // it would be stale. The lines it did see come with the panic.
+        self.wait_until(
+            || self.count(needle) >= wanted,
+            &format!("{needle} {wanted} time(s)"),
+        );
+    }
+
     fn wait_until(&self, done: impl Fn() -> bool, wanted: &str) {
         let deadline = Instant::now() + TIMEOUT;
         while Instant::now() < deadline {

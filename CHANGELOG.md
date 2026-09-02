@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+- With `--spa`, the console says so each time `index.html` goes missing while
+  the server runs, rather than leaving every address to answer 404 in silence
+
+### Fixed
+- A served directory this program was not allowed to open was announced as
+  replaced on every check, so the browser reloaded ten times a second
+- A path leading below a file, such as `--dir dist/index.html/js`, was reported
+  as a numbered error instead of being explained
+- An address this machine does not answer to, such as a typo in `--host`, was
+  reported as a numbered error instead of being explained
+
+### Changed
+- A failure now names what could not be done before it says why, as one
+  sentence: `cannot serve /site: there is no such directory`
+
 ## [0.5.2] - 2026-09-02
 
 ### Fixed

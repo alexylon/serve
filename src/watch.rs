@@ -1,6 +1,7 @@
 //! Watching the served directory, and telling the browser when it changed.
 
 use crate::guard::is_hidden;
+use anyhow::Result;
 use file_id::FileId;
 use notify_debouncer_full::notify::ErrorKind as WatchError;
 use notify_debouncer_full::notify::event::{AccessKind, AccessMode};
@@ -53,7 +54,7 @@ enum Rewatch {
 
 /// Starts watching `root` and keeps it watched for as long as the program
 /// runs. The watcher lives on the thread this spawns.
-pub(crate) fn start(root: &Path, reloader: Reloader) -> Result<(), String> {
+pub(crate) fn start(root: &Path, reloader: Reloader) -> Result<()> {
     let (failed, failures) = mpsc::channel();
 
     // When a rebuild was last announced. The check notices a new directory
@@ -88,7 +89,7 @@ pub(crate) fn start(root: &Path, reloader: Reloader) -> Result<(), String> {
             }
         }
     })
-    .map_err(|error| cannot_watch(&error))?;
+    .map_err(|error| cannot_watch_here(root, &error))?;
 
     // Look first, then watch. The other way round, a directory replaced in
     // between would leave the watch on the old one and the number remembered
@@ -96,7 +97,7 @@ pub(crate) fn start(root: &Path, reloader: Reloader) -> Result<(), String> {
     let first_look = Watched::at(root);
     debouncer
         .watch(root, RecursiveMode::Recursive)
-        .map_err(|error| format!("{}: {}", root.display(), cannot_watch(&error)))?;
+        .map_err(|error| cannot_watch_here(root, &error))?;
 
     let root = root.to_path_buf();
     std::thread::spawn(move || {
@@ -303,9 +304,15 @@ fn cannot_watch(error: &notify_debouncer_full::notify::Error) -> String {
              output rather than the whole project, or raise the limit"
             .to_string(),
         WatchError::PathNotFound => "there is no such directory".to_string(),
-        WatchError::Io(io) => crate::why(io),
+        WatchError::Io(io) => crate::errors::why(io),
         _ => error.to_string(),
     }
+}
+
+/// The same, naming the directory it is about.
+fn cannot_watch_here(root: &Path, error: &notify_debouncer_full::notify::Error) -> anyhow::Error {
+    anyhow::Error::msg(cannot_watch(error))
+        .context(format!("cannot watch {} for changes", root.display()))
 }
 
 #[cfg(test)]
