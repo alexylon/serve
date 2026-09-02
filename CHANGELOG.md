@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-02
+
 ### Added
 - The next free port is used when 3030 is busy and no port was asked for; the
   banner says which one
