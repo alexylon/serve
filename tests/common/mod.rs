@@ -79,11 +79,19 @@ impl Server {
     /// Starts the server on a port the system chooses, and waits until it is
     /// listening. Everything it prints is collected for the assertions below.
     pub fn start(dir: &Path, args: &[&str]) -> Server {
+        Server::spawn(dir, &["--port", "0"], args)
+    }
+
+    /// Says nothing about the port, so the server picks one itself.
+    pub fn start_choosing_a_port(dir: &Path) -> Server {
+        Server::spawn(dir, &[], &[])
+    }
+
+    fn spawn(dir: &Path, port: &[&str], args: &[&str]) -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_servio"))
             .arg("--dir")
             .arg(dir)
-            .arg("--port")
-            .arg("0")
+            .args(port)
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

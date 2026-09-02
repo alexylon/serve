@@ -53,11 +53,16 @@ servio --host 0.0.0.0
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--dir`, `-d` | `.` | Directory to serve |
-| `--port`, `-p` | `3030` | Port to listen on |
+| `--port`, `-p` | `3030` | Port to listen on, or the next free one |
 | `--host` | `127.0.0.1` | Address to listen on |
 | `--spa` | off | Serve `index.html` when the address matches no file |
 | `--no-reload` | off | Do not watch for changes, and do not refresh the browser |
 | `--cache-assets` | off | Let the browser keep files under `/assets/` for a year |
+
+If you say nothing about the port and 3030 is busy, the next free one is used
+and the banner says so, so a server left running in another window is not in
+your way. Ask for a port and you get that one or an error: something else
+expects that number, and moving quietly would only puzzle you later.
 
 ## What refreshes the page, and what does not
 

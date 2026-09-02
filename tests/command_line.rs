@@ -89,3 +89,42 @@ fn says_what_it_is_doing_on_the_way_up() {
     assert!(server.said("Live reload"));
     assert!(server.said("Single-page app"));
 }
+
+#[test]
+fn a_port_that_was_asked_for_is_never_swapped_for_another() {
+    // Something else expects that number: a proxy rule, a service file, a
+    // bookmark. Moving quietly would turn a loud failure into a puzzling one.
+    let dir = TempDir::new("busy-port");
+    dir.write("index.html", "<html>hi</html>");
+    let taken = Server::start(dir.path(), &[]);
+
+    let (said, ok) = run(&[
+        "--dir",
+        dir.path().to_str().unwrap(),
+        "--port",
+        &taken.port.to_string(),
+    ]);
+
+    assert!(!ok);
+    assert!(said.contains(&taken.port.to_string()), "{said}");
+    assert!(said.contains("already in use"), "{said}");
+    assert!(
+        !said.contains("os error"),
+        "no numbered errors, please: {said}"
+    );
+}
+
+#[test]
+fn the_next_port_is_used_when_none_was_asked_for() {
+    let dir = TempDir::new("next-port");
+    dir.write("index.html", "<html>hi</html>");
+
+    let first = Server::start_choosing_a_port(dir.path());
+    let second = Server::start_choosing_a_port(dir.path());
+
+    assert_ne!(first.port, second.port);
+    assert_eq!(second.port, first.port + 1);
+    assert!(second.said("was busy"), "{}", second.lines().join("\n"));
+    assert!(!first.said("was busy"), "{}", first.lines().join("\n"));
+    assert_eq!(get(second.port, "/").status, 200);
+}

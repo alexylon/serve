@@ -8,11 +8,13 @@ use notify_debouncer_full::notify::event::{AccessKind, AccessMode};
 use notify_debouncer_full::notify::{EventKind, RecursiveMode, event::ModifyKind};
 use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
 use std::fmt::Display;
+use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::net::TcpListener;
 use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -25,9 +27,9 @@ use tower_livereload::LiveReloadLayer;
     about = "HTTP server for static files, with live reload, for local development"
 )]
 struct Args {
-    /// Port to listen on
-    #[arg(short, long, default_value_t = 3030)]
-    port: u16,
+    /// Port to listen on [default: 3030, or the next free one]
+    #[arg(short, long)]
+    port: Option<u16>,
 
     /// Address to listen on (use 0.0.0.0 to reach this server from other devices)
     #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
@@ -58,6 +60,13 @@ const LINK_MID: &str = "\x1b\\";
 const RULE: &str = "-----------------------------------------------";
 /// Fits the longest label, so the colons line up.
 const LABEL_WIDTH: usize = 15;
+
+/// Where to listen when nothing else is asked for.
+const DEFAULT_PORT: u16 = 3030;
+
+/// How many ports to step through before giving up. Enough for a few servers
+/// left running, few enough that the address stays easy to remember.
+const PORTS_TO_TRY: u16 = 10;
 
 /// Long enough to group the writes one save makes, short enough that the
 /// refresh still feels immediate.
@@ -107,9 +116,40 @@ async fn main() {
     }
 }
 
+/// Takes the port that was asked for. Asking for one and not getting it is an
+/// error: something else expects that number. Asking for none steps up from
+/// 3030 until a free port turns up, since the banner says which one it is.
+async fn listen(host: IpAddr, port: Option<u16>) -> Result<TcpListener, std::io::Error> {
+    if let Some(port) = port {
+        return match TcpListener::bind(SocketAddr::new(host, port)).await {
+            Err(error) if error.kind() == ErrorKind::AddrInUse => {
+                Err(in_use(&format!("port {port} is already in use")))
+            }
+            listener => listener,
+        };
+    }
+
+    for port in DEFAULT_PORT..DEFAULT_PORT + PORTS_TO_TRY {
+        match TcpListener::bind(SocketAddr::new(host, port)).await {
+            Ok(listener) => return Ok(listener),
+            Err(error) if error.kind() == ErrorKind::AddrInUse => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(in_use(&format!(
+        "ports {DEFAULT_PORT} to {} are all in use",
+        DEFAULT_PORT + PORTS_TO_TRY - 1
+    )))
+}
+
+/// The one thing to do about a busy port, said once.
+fn in_use(what: &str) -> std::io::Error {
+    std::io::Error::other(format!("{what} — choose another one with --port"))
+}
+
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let addr = SocketAddr::new(args.host, args.port);
     let static_dir = resolve_dir(args.dir)?;
 
     // A missing path already failed in resolve_dir; this catches a file.
@@ -245,7 +285,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             "strict-origin-when-cross-origin",
         ));
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = listen(args.host, args.port).await?;
 
     // With `--port 0` the system chooses the port, so ask the listener.
     let bound = listener.local_addr()?;
@@ -266,6 +306,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("{RULE}");
     banner_row("Serving", static_dir.display());
+    if args.port.is_none() && bound.port() != DEFAULT_PORT {
+        banner_row(
+            "Note",
+            format!("port {DEFAULT_PORT} was busy, using {}", bound.port()),
+        );
+    }
     banner_row("Live reload", on_off(!args.no_reload));
     banner_row("Single-page app", on_off(args.spa));
     banner_row(
