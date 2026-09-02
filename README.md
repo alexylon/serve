@@ -86,6 +86,11 @@ With `--spa`, missing page routes fall back to `index.html` so the client-side
 router can handle them. Missing scripts, stylesheets, images, and anything
 under `/assets/` still return 404, making broken asset paths easy to spot.
 
+If `index.html` disappears while the server is running, such as during a build
+that clears the output directory, servio says so in the terminal. It says it
+once each time the page goes missing rather than once per route, so a broken
+build does not leave every address returning 404 without explanation.
+
 Without `--spa`, every missing path returns 404.
 
 ## Serving a published site
