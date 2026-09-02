@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-02
+
 ### Added
 - With `--spa`, the console says so each time `index.html` goes missing while
   the server runs, rather than leaving every address to answer 404 in silence
