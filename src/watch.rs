@@ -122,12 +122,26 @@ fn supervise(
         let reason = match failures.recv_timeout(CHECK_INTERVAL) {
             Ok(()) => Rewatch::WatchFailed,
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            Err(mpsc::RecvTimeoutError::Timeout) => match directory_id(&root) {
+            Err(mpsc::RecvTimeoutError::Timeout) => {
                 // Missing for the moment means a build is between removing
                 // the directory and writing the new one.
-                Some(now) if Some(now) != watched.as_ref().map(|it| it.id) => Rewatch::Replaced,
-                _ => continue,
-            },
+                let Some(now) = directory_id(&root) else {
+                    continue;
+                };
+
+                match watched.as_ref().map(|it| it.id) {
+                    Some(before) if before != now => Rewatch::Replaced,
+                    Some(_) => continue,
+                    // Nothing to compare against: the directory could not
+                    // be reached when the watch went on, so the watch may be
+                    // on one that has since been replaced. Put it back on the
+                    // name, quietly: nothing is known to have changed.
+                    None => {
+                        watched = watch_again(&mut debouncer, &root, &failures);
+                        continue;
+                    }
+                }
+            }
         };
 
         watched = watch_again(&mut debouncer, &root, &failures);
@@ -202,18 +216,21 @@ fn is_change(root: &Path, event: &DebouncedEvent) -> bool {
 
 /// The directory the watcher is attached to.
 struct Watched {
-    /// Kept open on Unix so the system cannot give this directory's number to
-    /// the next one. Without this, a rebuild that lands in the same spot on
-    /// disk looks like no change at all.
+    /// Held open on Unix so the system cannot give this directory's number to
+    /// the next one. Without it, a rebuild that lands in the same spot on disk
+    /// looks like no change at all. A directory this program may not open
+    /// still has its number remembered, only without that protection.
     #[cfg(unix)]
-    _open: std::fs::File,
+    _open: Option<std::fs::File>,
     id: FileId,
 }
 
 impl Watched {
     #[cfg(unix)]
     fn at(path: &Path) -> Option<Watched> {
-        let open = std::fs::File::open(path).ok()?;
+        // Opened before the number is read, so the number cannot change hands
+        // in between.
+        let open = std::fs::File::open(path).ok();
         Some(Watched {
             _open: open,
             id: directory_id(path)?,
