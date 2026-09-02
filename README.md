@@ -1,7 +1,7 @@
 # servio
 
-Static file server with live reload, built with axum. Made for local development:
-nothing is cached, and the browser refreshes when a file changes.
+HTTP server for static files, with live reload, built with axum. Made for local
+development: nothing is cached, and the browser refreshes when a file changes.
 
 ## Features
 

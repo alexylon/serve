@@ -22,7 +22,7 @@ use tower_livereload::LiveReloadLayer;
 #[command(
     author,
     version,
-    about = "Static file server with live reload, for local development"
+    about = "HTTP server for static files, with live reload, for local development"
 )]
 struct Args {
     /// Port to listen on
