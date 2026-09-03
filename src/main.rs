@@ -40,6 +40,11 @@ struct Args {
     #[arg(long)]
     no_reload: bool,
 
+    /// Find changes by looking at the files, for a network or shared folder
+    /// the system reports no changes in
+    #[arg(long, conflicts_with = "no_reload")]
+    poll: bool,
+
     /// Let the browser keep files under /assets/ for a year, for a published site
     #[arg(long)]
     cache_assets: bool,
@@ -70,7 +75,7 @@ async fn run() -> Result<()> {
 
     let livereload = LiveReloadLayer::new();
     if !args.no_reload {
-        watch::start(&static_dir, livereload.reloader())?;
+        watch::start(&static_dir, args.poll, livereload.reloader())?;
     }
 
     // One look, shared with the banner: two looks could disagree, and a page

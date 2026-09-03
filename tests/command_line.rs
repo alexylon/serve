@@ -160,6 +160,40 @@ fn says_what_it_is_doing_on_the_way_up() {
 }
 
 #[test]
+fn says_when_it_is_looking_at_the_files_rather_than_being_told() {
+    // Polling notices later and costs more, so the banner should not leave it
+    // looking like an ordinary run.
+    let dir = TempDir::new("polling-banner");
+    dir.write("index.html", "<html>hi</html>");
+
+    let server = Server::start(dir.path(), &["--poll"]);
+
+    assert!(
+        server.said("looking at the files"),
+        "the banner should say that it is polling:\n{}",
+        server.lines().join("\n")
+    );
+}
+
+#[test]
+fn looking_at_the_files_and_not_watching_at_all_is_refused() {
+    // Asking for both says two different things about the same thing.
+    let dir = TempDir::new("poll-and-no-reload");
+    dir.write("index.html", "<html>hi</html>");
+
+    let (said, ok) = run(&[
+        "--dir",
+        dir.path().to_str().unwrap(),
+        "--poll",
+        "--no-reload",
+    ]);
+
+    assert!(!ok);
+    assert!(said.contains("--poll"), "it should say which flags: {said}");
+    assert!(said.contains("--no-reload"), "{said}");
+}
+
+#[test]
 fn a_port_that_was_asked_for_is_never_swapped_for_another() {
     // Something else expects that number: a proxy rule, a service file, a
     // bookmark. Moving quietly would turn a loud failure into a puzzling one.

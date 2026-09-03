@@ -65,6 +65,7 @@ servio --host 0.0.0.0
 | `--host <HOST>` | `127.0.0.1` | Address to listen on |
 | `--spa` | off | Serve `index.html` when a page route matches no file |
 | `--no-reload` | off | Disable file watching and browser refreshes |
+| `--poll` | off | Find changes by looking at the files, once a second |
 | `--cache-assets` | off | Cache files under `/assets/` for one year |
 
 If you do not specify a port and 3030 is busy, servio tries the next available
@@ -79,6 +80,28 @@ directories, `target`, `node_modules`, and common editor temporary files.
 Live reload continues working when a build replaces the served directory. On
 macOS, changing file permissions may also trigger one refresh because of how
 the operating system reports file events.
+
+### When saving a file changes nothing
+
+Live reload normally waits for the operating system to report a change. Some
+filesystems never report one: network shares, folders shared with a virtual
+machine, and directories mounted into a container. There, `--poll` finds
+changes by looking at the files itself, once a second:
+
+```bash
+servio --dir /mnt/share --poll
+```
+
+Every look reads every file in the served directory and compares its contents,
+because a poll compares write times only to the whole second, and two saves
+within one second of each other would otherwise look like one. So
+`--poll` notices a change up to a second later than the ordinary watcher, and
+costs far more while it waits. Use it only where the ordinary watcher stays
+silent, and point it at the build output rather than the whole project tree, or
+every look will read `node_modules` as well.
+
+`--poll` cannot be combined with `--no-reload`, which turns off watching
+altogether.
 
 ## Single-page apps
 

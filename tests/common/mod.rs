@@ -139,7 +139,7 @@ impl Server {
 
     /// Every announcement that makes a connected browser refresh.
     pub fn reloads(&self) -> usize {
-        self.count("File changed") + self.count("Directory replaced")
+        self.count("File changed") + self.count("Directory replaced") + self.count("Watching again")
     }
 
     pub fn wait_for_reloads(&self, wanted: usize) {
@@ -179,7 +179,13 @@ impl Server {
     /// Waits long enough for a reload to have been announced, then insists
     /// none was.
     pub fn expect_no_reload(&self, before: usize) {
-        std::thread::sleep(SETTLE);
+        self.expect_no_reload_within(before, SETTLE);
+    }
+
+    /// The same, where the server needs longer to have noticed at all: a poll
+    /// hears nothing until its next look.
+    pub fn expect_no_reload_within(&self, before: usize, patience: Duration) {
+        std::thread::sleep(patience);
         assert_eq!(
             self.reloads(),
             before,

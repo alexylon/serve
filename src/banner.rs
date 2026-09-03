@@ -3,6 +3,7 @@
 use crate::Args;
 use crate::listen::DEFAULT_PORT;
 use crate::serve::INDEX_FILE;
+use crate::watch::POLL_INTERVAL;
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
@@ -28,7 +29,7 @@ pub(crate) fn print(bound: SocketAddr, args: &Args, static_dir: &Path, no_app_pa
             format!("port {DEFAULT_PORT} was busy, using {}", bound.port()),
         );
     }
-    row("Live reload", on_off(!args.no_reload));
+    row("Live reload", live_reload(args));
     row("Single-page app", on_off(args.spa));
     row(
         "Caching",
@@ -67,6 +68,20 @@ fn authority(bound: SocketAddr) -> String {
 
 fn row(label: &str, value: impl Display) {
     println!("  {label:<LABEL_WIDTH$}: {BLUE}{value}{RESET}");
+}
+
+/// Worth saying when the server is looking at the files rather than being told
+/// about them: that notices later, and reads the whole directory each time.
+fn live_reload(args: &Args) -> String {
+    if args.no_reload {
+        return "off".to_string();
+    }
+
+    if args.poll {
+        return format!("on, looking at the files every {POLL_INTERVAL:?}");
+    }
+
+    "on".to_string()
 }
 
 fn on_off(enabled: bool) -> &'static str {

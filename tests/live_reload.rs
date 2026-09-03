@@ -5,6 +5,10 @@ mod common;
 use common::{Server, TempDir, get, watches_for_reload};
 use std::time::Duration;
 
+/// Long enough for a poll to have had a look, and for the debounce to have
+/// grouped what it found.
+const A_LOOK: Duration = Duration::from_millis(2500);
+
 fn site(name: &str) -> TempDir {
     let dir = TempDir::new(name);
     dir.write("index.html", "<html>first</html>");
@@ -21,6 +25,165 @@ fn saving_a_file_refreshes_the_browser() {
     let before = server.reloads();
     dir.write("app.css", "body { color: red }");
     server.wait_for_reloads(before + 1);
+}
+
+#[test]
+fn saving_a_file_refreshes_the_browser_while_polling() {
+    // Where the system reports nothing, the look has to find the change itself.
+    let dir = site("save-polling");
+    let server = Server::start(dir.path(), &["--poll"]);
+    server.settle();
+
+    let before = server.reloads();
+    dir.write("app.css", "body { color: red }");
+    server.wait_for_reloads(before + 1);
+}
+
+#[test]
+fn while_polling_the_ignored_files_are_still_ignored() {
+    // A directory's write time moves for a swap file as readily as for a page,
+    // and counting that refreshed the browser for every scratch file an editor
+    // wrote.
+    let dir = site("scratch-polling");
+    let server = Server::start(dir.path(), &["--poll"]);
+    server.settle();
+
+    let before = server.reloads();
+    dir.write("index.html.swp", "vim");
+    dir.write("node_modules/left-pad/index.js", "module.exports = 1");
+
+    server.expect_no_reload_within(before, A_LOOK);
+}
+
+#[cfg(unix)]
+#[test]
+fn while_polling_a_path_it_cannot_read_is_not_a_broken_watch() {
+    // A dangling symlink is ordinary in build output, and a look meets it every
+    // time. Treated as a watch that had gone down, it set the watch up again
+    // once a second and refreshed the browser every time round.
+    let dir = site("unreadable-polling");
+    std::os::unix::fs::symlink("/nowhere", dir.join("broken")).expect("could not link");
+
+    let server = Server::start(dir.path(), &["--poll"]);
+    let before = server.reloads();
+    server.expect_no_reload_within(before, A_LOOK);
+
+    // And it is worth saying once, by name, not once a second.
+    assert_eq!(
+        server.count("Cannot look at broken"),
+        1,
+        "the same problem was said over and over:\n{}",
+        server.lines().join("\n")
+    );
+    assert!(
+        !server.said("Cannot watch for changes"),
+        "one unreadable path is not a watch that went down:\n{}",
+        server.lines().join("\n")
+    );
+
+    // What must not be lost: a real change is still found.
+    let before = server.reloads();
+    dir.write("app.css", "body { color: red }");
+    server.wait_for_reloads(before + 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn while_polling_an_unreadable_path_the_browser_never_sees_is_not_worth_saying() {
+    // Nothing under node_modules can change what the browser shows, so a
+    // complaint about it would send people after a fault that is not there.
+    let dir = site("ignored-unreadable-polling");
+    std::fs::create_dir_all(dir.join("node_modules/.bin")).expect("could not create it");
+    std::os::unix::fs::symlink("/nowhere", dir.join("node_modules/.bin/tool"))
+        .expect("could not link");
+
+    let server = Server::start(dir.path(), &["--poll"]);
+    let before = server.reloads();
+    server.expect_no_reload_within(before, A_LOOK);
+
+    assert!(
+        !server.said("Cannot"),
+        "an ignored path was complained about:\n{}",
+        server.lines().join("\n")
+    );
+}
+
+#[test]
+fn while_polling_a_rebuild_is_not_reported_as_a_fault() {
+    // A look that lands between the old directory going and the new one
+    // arriving finds nothing there. The check says "Directory replaced" when it
+    // does arrive; saying the directory cannot be read as well reads like a
+    // fault.
+    let dir = site("rebuild-quiet-polling");
+    let server = Server::start(dir.path(), &["--poll"]);
+    server.settle();
+
+    dir.remove_all();
+    std::thread::sleep(Duration::from_millis(1500));
+    dir.create();
+    dir.write("index.html", "<html>rebuilt</html>");
+    server.wait_for("Directory replaced");
+
+    assert!(
+        !server.said("Cannot"),
+        "a rebuild was reported as a fault:\n{}",
+        server.lines().join("\n")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn while_polling_a_second_save_in_the_same_second_still_refreshes() {
+    // A poll keeps the write time only to the whole second, so two saves close
+    // together carry the same one and only the contents tell them apart. The
+    // write time is pinned rather than raced for: the same second is otherwise
+    // a matter of luck.
+    let dir = site("same-second");
+    let save = |contents: &str| {
+        dir.write("app.css", contents);
+        let pinned = std::process::Command::new("touch")
+            .args(["-t", "202601011200"])
+            .arg(dir.join("app.css"))
+            .status()
+            .expect("could not run touch");
+        assert!(pinned.success(), "could not pin the write time");
+    };
+
+    save("body { color: red }");
+    let server = Server::start(dir.path(), &["--poll"]);
+    server.settle();
+
+    let before = server.reloads();
+    save("body { color: blue }");
+    server.wait_for_reloads(before + 1);
+}
+
+#[test]
+fn a_rebuild_is_announced_once_while_polling() {
+    // The check notices the new directory before the poll's own account of the
+    // same rebuild arrives. One rebuild, one line.
+    let dir = site("announced-once-polling");
+    let server = Server::start(dir.path(), &["--poll"]);
+    server.settle();
+
+    dir.remove_all();
+    dir.create();
+    dir.write("index.html", "<html>rebuilt</html>");
+    server.wait_for("Directory replaced");
+
+    // Long enough for the poll's own account of the rebuild to have arrived:
+    // one look, plus the debounce that groups what it found.
+    std::thread::sleep(Duration::from_millis(2000));
+    assert_eq!(
+        server.count("File changed"),
+        0,
+        "the rebuild was announced twice:\n{}",
+        server.lines().join("\n")
+    );
+
+    // What must not be lost: editing after a rebuild still says so.
+    dir.write("index.html", "<html>edited</html>");
+    server.wait_for("File changed");
 }
 
 #[test]

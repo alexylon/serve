@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- `--poll` finds changes by looking at the files once a second, reading each of
+  them, for network shares, folders shared with a virtual machine, and
+  directories mounted into a container, where the system reports no changes at
+  all. The banner says when a run is looking rather than being told
+
 ## [0.5.3] - 2026-09-02
 
 ### Added
