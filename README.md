@@ -54,6 +54,9 @@ servio --spa
 
 # Make the server reachable from other devices on your network
 servio --host 0.0.0.0
+
+# Open the browser as well
+servio --open
 ```
 
 ## Options
@@ -67,10 +70,20 @@ servio --host 0.0.0.0
 | `--no-reload` | off | Disable file watching and browser refreshes |
 | `--poll` | off | Find changes by looking at the files, once a second |
 | `--cache-assets` | off | Cache files under `/assets/` for one year |
+| `--open` | off | Open the address in the browser |
 
 If you do not specify a port and 3030 is busy, servio tries the next available
 port through 3039 and prints the selected address. If you specify a port,
 servio uses that exact port or exits with an error.
+
+`--open` opens the address in your usual browser, or in the one `BROWSER`
+names. That variable may be a whole command, with `%s` where the address goes:
+
+```bash
+BROWSER="firefox --new-window %s" servio --open
+```
+
+If no browser can be opened, servio says so and keeps serving.
 
 ## Live reload
 
@@ -99,6 +112,10 @@ within one second of each other would otherwise look like one. So
 costs far more while it waits. Use it only where the ordinary watcher stays
 silent, and point it at the build output rather than the whole project tree, or
 every look will read `node_modules` as well.
+
+Links are not followed. The server refuses to hand out anything outside the
+served directory, so a link leading out cannot change what the browser sees,
+and one leading back in points at files each look reads anyway.
 
 `--poll` cannot be combined with `--no-reload`, which turns off watching
 altogether.

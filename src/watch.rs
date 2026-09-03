@@ -12,6 +12,7 @@ use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
     new_debouncer_opt,
 };
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -91,9 +92,17 @@ pub(crate) fn start(root: &Path, poll: bool, reloader: Reloader) -> Result<()> {
             // The contents, not just the write time: a poll keeps that only to
             // the whole second, so two saves within one second of each other
             // would look like one and the second would never reach the browser.
+            //
+            // Links are not followed. The server hands out nothing outside the
+            // served directory, so a link leading out cannot change what the
+            // browser sees, and one leading back in points at files this look
+            // reads anyway. Following them reads everything twice, and a link
+            // to a directory above makes a walk with no end; `node_modules`
+            // has those.
             notify::Config::default()
                 .with_poll_interval(POLL_INTERVAL)
-                .with_compare_contents(true),
+                .with_compare_contents(true)
+                .with_follow_symlinks(false),
         )
         .map_err(|error| cannot_watch_here(root, &error))?;
 
@@ -406,21 +415,25 @@ fn is_ignored(root: &Path, path: &Path) -> bool {
 /// saying anything would be noise.
 fn cannot_look(root: &Path, error: &notify_debouncer_full::notify::Error) -> Option<String> {
     let Some(path) = error.paths.first() else {
-        // Nothing to name, so this is about the watching itself.
-        return Some(format!("Cannot watch for changes: {}", cannot_watch(error)));
+        // Nothing to name. Not a watch that went down either: the next look
+        // starts afresh.
+        return Some(format!(
+            "Cannot look at part of the directory: {}",
+            cannot_watch(error)
+        ));
     };
 
     // A path the browser never sees cannot change what it shows: a file in
-    // node_modules this program may not read, a dangling link in a build
-    // directory.
+    // node_modules this program may not read.
     if is_ignored(root, path) {
         return None;
     }
 
-    // The served directory, gone for the moment: a build is between removing it
-    // and writing the new one, and the check says so when it comes back. One
-    // that is there and still cannot be read is worth saying.
-    if path == root && !root.exists() {
+    // Not there when the look reached it: a build removing a file and writing
+    // it again, or clearing the served directory before filling it. Either it
+    // stays gone, and the removal is reported as the change it is, or it is
+    // already back. The check says when the directory itself returns.
+    if was_not_there(error) {
         return None;
     }
 
@@ -439,6 +452,15 @@ fn cannot_look(root: &Path, error: &notify_debouncer_full::notify::Error) -> Opt
         named.display(),
         cannot_watch(error)
     ))
+}
+
+/// True when the look found nothing at that name.
+fn was_not_there(error: &notify_debouncer_full::notify::Error) -> bool {
+    match &error.kind {
+        WatchError::Io(io) => io.kind() == ErrorKind::NotFound,
+        WatchError::PathNotFound => true,
+        _ => false,
+    }
 }
 
 /// Why the watcher could not be set up, in plain words. The limit is the one
@@ -648,6 +670,42 @@ mod tests {
         // A poll hears about a rebuild a whole look later, and the window has
         // to cover that; too short, and one rebuild is announced twice.
         assert!(same_rebuild(true) >= same_rebuild(false) + POLL_INTERVAL);
+    }
+
+    fn could_not_read(path: &Path, kind: ErrorKind) -> notify_debouncer_full::notify::Error {
+        notify_debouncer_full::notify::Error::io(kind.into()).add_path(path.to_path_buf())
+    }
+
+    #[test]
+    fn a_path_that_was_not_there_is_not_worth_a_word() {
+        // A build removes a file and writes it again, and the look lands in
+        // between. Whether it is back by now makes no difference.
+        let root = Path::new(ROOT);
+        let rewritten = Path::new("/site/app.css");
+
+        assert_eq!(
+            cannot_look(root, &could_not_read(rewritten, ErrorKind::NotFound)),
+            None
+        );
+
+        // One that is there and cannot be read is worth saying, in words that
+        // do not call a stylesheet a directory.
+        let said = cannot_look(
+            root,
+            &could_not_read(rewritten, ErrorKind::PermissionDenied),
+        )
+        .expect("a path that cannot be read should be reported");
+        assert!(said.starts_with("Cannot look at app.css:"), "{said}");
+        assert!(!said.contains("directory"), "{said}");
+    }
+
+    #[test]
+    fn trouble_with_no_path_is_not_a_watch_that_went_down() {
+        let error = notify_debouncer_full::notify::Error::generic("a walk with no end");
+        let said = cannot_look(Path::new(ROOT), &error).expect("it should be reported");
+
+        assert!(!said.contains("Cannot watch for changes"), "{said}");
+        assert!(said.contains("a walk with no end"), "{said}");
     }
 
     #[cfg(any(unix, windows))]

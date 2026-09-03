@@ -29,6 +29,8 @@ notify-debouncer-full = "0.5"
 http = "1"
 # Tells one directory from another; notify already builds it.
 file-id = "0.2"
+# Finds the browser, on each system's own terms.
+open = "5"
 
 [profile.release]
 lto = true

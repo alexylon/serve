@@ -7,6 +7,9 @@
   them, for network shares, folders shared with a virtual machine, and
   directories mounted into a container, where the system reports no changes at
   all. The banner says when a run is looking rather than being told
+- `--open` opens the address in the browser once the server is up: the usual
+  one, or whatever `BROWSER` names, which may be a whole command with `%s` where
+  the address goes
 
 ## [0.5.3] - 2026-09-02
 

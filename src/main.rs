@@ -1,4 +1,5 @@
 mod banner;
+mod browser;
 mod errors;
 mod guard;
 mod listen;
@@ -48,6 +49,10 @@ struct Args {
     /// Let the browser keep files under /assets/ for a year, for a published site
     #[arg(long)]
     cache_assets: bool,
+
+    /// Open the address in the browser once the server is up
+    #[arg(long)]
+    open: bool,
 }
 
 #[tokio::main]
@@ -97,6 +102,9 @@ async fn run() -> Result<()> {
         .local_addr()
         .context("cannot tell which address the server is listening on")?;
     banner::print(bound, &args, &static_dir, no_app_page);
+    if args.open {
+        browser::open(&banner::url(bound));
+    }
 
     axum::serve(listener, app)
         .await

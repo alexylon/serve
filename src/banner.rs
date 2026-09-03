@@ -19,7 +19,7 @@ const LABEL_WIDTH: usize = 15;
 
 pub(crate) fn print(bound: SocketAddr, args: &Args, static_dir: &Path, no_app_page: bool) {
     let authority = authority(bound);
-    let url = format!("http://{authority}");
+    let url = url(bound);
 
     println!("{RULE}");
     row("Serving", static_dir.display());
@@ -49,7 +49,12 @@ pub(crate) fn print(bound: SocketAddr, args: &Args, static_dir: &Path, no_app_pa
     println!("{RULE}\n");
 }
 
-/// The address to open in a browser. 0.0.0.0 and [::] mean every network
+/// The address a browser can open.
+pub(crate) fn url(bound: SocketAddr) -> String {
+    format!("http://{}", authority(bound))
+}
+
+/// The host and port of that address. 0.0.0.0 and [::] mean every network
 /// interface, which a browser cannot open, so those become localhost. So do
 /// 127.0.0.1 and ::1, and nothing else: 127.0.0.2 is loopback too, but the
 /// name does not lead there.

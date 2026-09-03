@@ -9,6 +9,16 @@ use std::time::Duration;
 /// grouped what it found.
 const A_LOOK: Duration = Duration::from_millis(2500);
 
+/// Closes a directory to this program, which is how a look comes to fail on a
+/// path that is still there.
+#[cfg(unix)]
+fn close_to_us(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000))
+        .expect("could not close the directory");
+}
+
 fn site(name: &str) -> TempDir {
     let dir = TempDir::new(name);
     dir.write("index.html", "<html>first</html>");
@@ -58,11 +68,18 @@ fn while_polling_the_ignored_files_are_still_ignored() {
 #[cfg(unix)]
 #[test]
 fn while_polling_a_path_it_cannot_read_is_not_a_broken_watch() {
-    // A dangling symlink is ordinary in build output, and a look meets it every
-    // time. Treated as a watch that had gone down, it set the watch up again
-    // once a second and refreshed the browser every time round.
+    // A look meets the same closed directory every time. Treated as a watch
+    // that had gone down, it set the watch up again once a second and refreshed
+    // the browser every time round.
     let dir = site("unreadable-polling");
-    std::os::unix::fs::symlink("/nowhere", dir.join("broken")).expect("could not link");
+    let closed = dir.join("closed");
+    std::fs::create_dir_all(&closed).expect("could not create the directory");
+    close_to_us(&closed);
+
+    // Running as root, which reads it anyway: nothing to check.
+    if std::fs::read_dir(&closed).is_ok() {
+        return;
+    }
 
     let server = Server::start(dir.path(), &["--poll"]);
     let before = server.reloads();
@@ -70,7 +87,7 @@ fn while_polling_a_path_it_cannot_read_is_not_a_broken_watch() {
 
     // And it is worth saying once, by name, not once a second.
     assert_eq!(
-        server.count("Cannot look at broken"),
+        server.count("Cannot look at closed"),
         1,
         "the same problem was said over and over:\n{}",
         server.lines().join("\n")
@@ -93,9 +110,13 @@ fn while_polling_an_unreadable_path_the_browser_never_sees_is_not_worth_saying()
     // Nothing under node_modules can change what the browser shows, so a
     // complaint about it would send people after a fault that is not there.
     let dir = site("ignored-unreadable-polling");
-    std::fs::create_dir_all(dir.join("node_modules/.bin")).expect("could not create it");
-    std::os::unix::fs::symlink("/nowhere", dir.join("node_modules/.bin/tool"))
-        .expect("could not link");
+    let closed = dir.join("node_modules/.cache");
+    std::fs::create_dir_all(&closed).expect("could not create it");
+    close_to_us(&closed);
+
+    if std::fs::read_dir(&closed).is_ok() {
+        return;
+    }
 
     let server = Server::start(dir.path(), &["--poll"]);
     let before = server.reloads();
@@ -106,6 +127,49 @@ fn while_polling_an_unreadable_path_the_browser_never_sees_is_not_worth_saying()
         "an ignored path was complained about:\n{}",
         server.lines().join("\n")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn while_polling_a_link_that_leads_nowhere_is_not_a_fault() {
+    // Build output is full of these. Links are not followed, so there is
+    // nothing to report.
+    let dir = site("dangling-polling");
+    std::os::unix::fs::symlink("/nowhere", dir.join("broken")).expect("could not link");
+
+    let server = Server::start(dir.path(), &["--poll"]);
+    let before = server.reloads();
+    server.expect_no_reload_within(before, A_LOOK);
+
+    assert!(
+        !server.said("Cannot"),
+        "a link that leads nowhere was reported as a fault:\n{}",
+        server.lines().join("\n")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn while_polling_a_link_to_a_directory_above_is_not_a_walk_with_no_end() {
+    // What npm and pnpm leave in node_modules. Followed, the walk never ends,
+    // and servio said the watch was broken while it was doing its job.
+    let dir = site("loop-polling");
+    std::fs::create_dir_all(dir.join("node_modules/pkg")).expect("could not create it");
+    std::os::unix::fs::symlink("../..", dir.join("node_modules/pkg/up")).expect("could not link");
+
+    let server = Server::start(dir.path(), &["--poll"]);
+    server.settle();
+
+    assert!(
+        !server.said("Cannot"),
+        "a link to a directory above was reported as a fault:\n{}",
+        server.lines().join("\n")
+    );
+
+    // And the look still finds a real change.
+    let before = server.reloads();
+    dir.write("app.css", "body { color: red }");
+    server.wait_for_reloads(before + 1);
 }
 
 #[test]

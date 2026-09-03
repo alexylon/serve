@@ -193,6 +193,117 @@ fn looking_at_the_files_and_not_watching_at_all_is_refused() {
     assert!(said.contains("--no-reload"), "{said}");
 }
 
+#[cfg(unix)]
+#[test]
+fn opens_an_address_a_browser_can_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // A stand-in for the browser, kept outside the served directory so that
+    // what it writes is not taken for a change.
+    let dir = TempDir::new("open");
+    dir.write("index.html", "<html>hi</html>");
+    let outside = TempDir::new("open-browser");
+    let browser = outside.join("browser.sh");
+    let opened = outside.join("opened");
+    outside.write(
+        "browser.sh",
+        &format!("#!/bin/sh\necho \"$@\" > '{}'\n", opened.display()),
+    );
+    std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755))
+        .expect("could not make the browser runnable");
+
+    // 0.0.0.0 is not an address a browser can open; localhost is.
+    let server = Server::start_in(
+        dir.path(),
+        &["--open", "--host", "0.0.0.0"],
+        &[("BROWSER", browser.to_str().unwrap())],
+    );
+
+    assert_eq!(
+        wait_for_a_line(&opened, &server),
+        format!("http://localhost:{}", server.port)
+    );
+}
+
+/// What the stand-in browser was given. The shell creates the file before
+/// writing the line, so an empty file means the browser has not run yet.
+fn wait_for_a_line(written: &std::path::Path, server: &Server) -> String {
+    let deadline = Instant::now() + STARTS_WITHIN;
+    loop {
+        if let Ok(line) = std::fs::read_to_string(written)
+            && !line.trim().is_empty()
+        {
+            return line.trim().to_string();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no browser was opened:\n{}",
+            server.lines().join("\n")
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_browser_named_with_its_own_arguments_still_opens() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Options and %s for the address, as the variable is used elsewhere.
+    // Handed to the system whole, this named no program and nothing opened.
+    let dir = TempDir::new("open-arguments");
+    dir.write("index.html", "<html>hi</html>");
+    let outside = TempDir::new("open-arguments-browser");
+    let browser = outside.join("browser.sh");
+    let opened = outside.join("opened");
+    outside.write(
+        "browser.sh",
+        &format!("#!/bin/sh\necho \"$@\" > '{}'\n", opened.display()),
+    );
+    std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755))
+        .expect("could not make the browser runnable");
+
+    let server = Server::start_in(
+        dir.path(),
+        &["--open"],
+        &[(
+            "BROWSER",
+            &format!("{} --new-window %s", browser.to_str().unwrap()),
+        )],
+    );
+
+    assert_eq!(
+        wait_for_a_line(&opened, &server),
+        format!("--new-window http://localhost:{}", server.port)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_browser_that_will_not_open_does_not_stop_the_server() {
+    let dir = TempDir::new("no-browser");
+    dir.write("index.html", "<html>hi</html>");
+
+    let server = Server::start_in(
+        dir.path(),
+        &["--open"],
+        &[("BROWSER", "/definitely/not/a/browser")],
+    );
+
+    server.wait_for("Cannot open a browser");
+    assert!(
+        server.said("/definitely/not/a/browser"),
+        "{}",
+        server.lines().join("\n")
+    );
+    assert!(
+        !server.said("os error"),
+        "no numbered errors, please:\n{}",
+        server.lines().join("\n")
+    );
+    assert_eq!(get(server.port, "/").status, 200);
+}
+
 #[test]
 fn a_port_that_was_asked_for_is_never_swapped_for_another() {
     // Something else expects that number: a proxy rule, a service file, a
