@@ -2,6 +2,7 @@ mod banner;
 mod browser;
 mod errors;
 mod guard;
+mod ignore;
 mod listen;
 mod serve;
 mod watch;
@@ -53,6 +54,12 @@ struct Args {
     /// Open the address in the browser once the server is up
     #[arg(long)]
     open: bool,
+
+    /// Do not refresh the browser for a change matching this pattern, such as
+    /// "*.log" or "cache"; may be given more than once, or kept one to a line
+    /// in a .servioignore file in the served directory
+    #[arg(long, value_name = "PATTERN", conflicts_with = "no_reload")]
+    ignore: Vec<String>,
 }
 
 #[tokio::main]
@@ -79,8 +86,16 @@ async fn run() -> Result<()> {
     }
 
     let livereload = LiveReloadLayer::new();
+    let reloader = livereload.reloader();
+
+    // Read before the port is bound: a bad pattern is a reason to stop, not
+    // to serve.
+    let mut from_ignore_file = 0;
+    let mut ignored = None;
     if !args.no_reload {
-        watch::start(&static_dir, args.poll, livereload.reloader())?;
+        let file = ignore::read_file(&static_dir)?;
+        from_ignore_file = file.len();
+        ignored = Some(ignore::Ignored::from(&args.ignore, &file)?);
     }
 
     // One look, shared with the banner: two looks could disagree, and a page
@@ -101,7 +116,16 @@ async fn run() -> Result<()> {
     let bound = listener
         .local_addr()
         .context("cannot tell which address the server is listening on")?;
-    banner::print(bound, &args, &static_dir, no_app_page);
+    banner::print(bound, &args, &static_dir, no_app_page, from_ignore_file);
+
+    // Watched once the address is on screen: a poll reads every file before it
+    // starts, which on the folders it is for can take a while. The port is
+    // bound by now, so a browser arriving meanwhile waits rather than being
+    // refused.
+    if let Some(ignored) = ignored {
+        watch::start(&static_dir, args.poll, ignored, reloader)?;
+    }
+
     if args.open {
         browser::open(&banner::url(bound));
     }

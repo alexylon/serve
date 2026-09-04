@@ -26,6 +26,8 @@ pub(crate) fn why(error: &std::io::Error) -> String {
         ErrorKind::PermissionDenied => "the system will not let this program read it".to_string(),
         // `--dir dist/index.html/js`: a name below a file.
         ErrorKind::NotADirectory => "part of that path is a file, not a directory".to_string(),
+        // A file was expected and a directory found, the other way round.
+        ErrorKind::IsADirectory => "it is a directory, not a file".to_string(),
         _ => error.to_string(),
     }
 }

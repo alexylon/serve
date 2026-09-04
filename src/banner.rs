@@ -1,6 +1,7 @@
 //! What the server says on the way up.
 
 use crate::Args;
+use crate::ignore::IGNORE_FILE;
 use crate::listen::DEFAULT_PORT;
 use crate::serve::INDEX_FILE;
 use crate::watch::POLL_INTERVAL;
@@ -17,7 +18,13 @@ const RULE: &str = "-----------------------------------------------";
 /// Fits the longest label, so the colons line up.
 const LABEL_WIDTH: usize = 15;
 
-pub(crate) fn print(bound: SocketAddr, args: &Args, static_dir: &Path, no_app_page: bool) {
+pub(crate) fn print(
+    bound: SocketAddr,
+    args: &Args,
+    static_dir: &Path,
+    no_app_page: bool,
+    from_ignore_file: usize,
+) {
     let authority = authority(bound);
     let url = url(bound);
 
@@ -30,6 +37,9 @@ pub(crate) fn print(bound: SocketAddr, args: &Args, static_dir: &Path, no_app_pa
         );
     }
     row("Live reload", live_reload(args));
+    if let Some(ignoring) = ignoring(&args.ignore, from_ignore_file) {
+        row("Ignoring", ignoring);
+    }
     row("Single-page app", on_off(args.spa));
     row(
         "Caching",
@@ -89,6 +99,19 @@ fn live_reload(args: &Args) -> String {
     "on".to_string()
 }
 
+/// The patterns given, and how many the ignore file added, or nothing when
+/// there were none of either.
+fn ignoring(given: &[String], from_file: usize) -> Option<String> {
+    let mut parts: Vec<String> = given.to_vec();
+    match from_file {
+        0 => {}
+        1 => parts.push(format!("1 pattern in {IGNORE_FILE}")),
+        many => parts.push(format!("{many} patterns in {IGNORE_FILE}")),
+    }
+
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
 fn on_off(enabled: bool) -> &'static str {
     if enabled { "on" } else { "off" }
 }
@@ -96,4 +119,25 @@ fn on_off(enabled: bool) -> &'static str {
 /// Makes `text` a clickable link to `url` in terminals that support it.
 fn hyperlink(url: &str, text: impl Display) -> String {
     format!("{LINK_START}{url}{LINK_MID}{text}{LINK_END}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_is_ignored_is_listed_and_the_file_is_counted() {
+        let given = ["*.map".to_string()];
+
+        assert_eq!(ignoring(&[], 0), None);
+        assert_eq!(ignoring(&given, 0).as_deref(), Some("*.map"));
+        assert_eq!(
+            ignoring(&given, 1).as_deref(),
+            Some("*.map, 1 pattern in .servioignore")
+        );
+        assert_eq!(
+            ignoring(&[], 2).as_deref(),
+            Some("2 patterns in .servioignore")
+        );
+    }
 }

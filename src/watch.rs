@@ -1,6 +1,6 @@
 //! Watching the served directory, and telling the browser when it changed.
 
-use crate::guard::is_hidden;
+use crate::ignore::Ignored;
 use anyhow::Result;
 use file_id::FileId;
 use notify_debouncer_full::notify::ErrorKind as WatchError;
@@ -13,7 +13,7 @@ use notify_debouncer_full::{
     new_debouncer_opt,
 };
 use std::io::ErrorKind;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -31,16 +31,6 @@ pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// How often to check that the served directory is still the one being
 /// watched, and how long to wait between attempts to watch it again.
 const CHECK_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Directories whose contents should never refresh the browser. Hidden ones,
-/// `.git` and `.svelte-kit` among them, are covered by [`is_hidden`].
-const IGNORED_DIRS: &[&str] = &["target", "node_modules"];
-
-/// Scratch files editors leave behind: vim swap files, backup copies.
-const IGNORED_SUFFIXES: &[&str] = &["~", ".tmp", ".swp", ".swx", ".swo"];
-
-/// vim writes `4913` to test whether a directory accepts writes.
-const IGNORED_NAMES: &[&str] = &["4913"];
 
 /// How many unreadable paths are worth naming. Past that it goes quiet.
 const MOST_PROBLEMS: usize = 20;
@@ -65,7 +55,7 @@ enum Rewatch {
 /// Slower, and more work, but the only way to notice a change the system says
 /// nothing about: a network share, a folder shared with a virtual machine, a
 /// directory handed to a container.
-pub(crate) fn start(root: &Path, poll: bool, reloader: Reloader) -> Result<()> {
+pub(crate) fn start(root: &Path, poll: bool, ignored: Ignored, reloader: Reloader) -> Result<()> {
     let (failed, failures) = mpsc::channel();
 
     // When a rebuild was last announced. The check notices a new directory
@@ -77,6 +67,7 @@ pub(crate) fn start(root: &Path, poll: bool, reloader: Reloader) -> Result<()> {
     let report = report_changes(
         root.to_path_buf(),
         poll,
+        ignored,
         Arc::clone(&announced),
         same_rebuild(poll),
         reloader.clone(),
@@ -119,6 +110,7 @@ pub(crate) fn start(root: &Path, poll: bool, reloader: Reloader) -> Result<()> {
 fn report_changes(
     root: PathBuf,
     polling: bool,
+    ignored: Ignored,
     announced: Arc<Mutex<Option<Instant>>>,
     same_rebuild: Duration,
     changed: Reloader,
@@ -130,7 +122,18 @@ fn report_changes(
 
     move |result| match result {
         Ok(events) => {
-            if events.iter().any(|event| is_change(&root, event, polling)) {
+            // A build clearing the served directory is the check's to report,
+            // once, when the new one lands. Nothing is refreshed on the way:
+            // the page cannot load from a directory that is not there, and the
+            // one on screen is still the last that could.
+            if clearing_the_directory(&root, &events, polling) {
+                return;
+            }
+
+            if events
+                .iter()
+                .any(|event| is_change(&ignored, &root, event, polling))
+            {
                 // These events are the rebuild just announced, and one rebuild
                 // deserves one line. The page is refreshed either way.
                 if !just_announced(&announced, same_rebuild) {
@@ -145,7 +148,10 @@ fn report_changes(
         // refresh the browser every time round. A directory replaced underneath
         // is still noticed by the check.
         Err(errors) if polling => {
-            for problem in errors.iter().filter_map(|error| cannot_look(&root, error)) {
+            for problem in errors
+                .iter()
+                .filter_map(|error| cannot_look(&ignored, &root, error))
+            {
                 // Every look meets the same path, and once is enough.
                 if !told.contains(&problem) && told.len() < MOST_PROBLEMS {
                     eprintln!("  {problem}");
@@ -219,23 +225,30 @@ fn supervise<W: notify::Watcher>(
                     // on one that has since been replaced. Put it back on the
                     // name, quietly: nothing is known to have changed.
                     None => {
-                        watched = watch_again(&mut debouncer, &root, &failures);
+                        watched = watch_again(&mut debouncer, &root, &failures, None);
                         continue;
                     }
                 }
             }
         };
 
-        watched = watch_again(&mut debouncer, &root, &failures);
+        // Marked before the rewatch, once the old watch is off, and after: a
+        // look may be in progress when the old watch comes off, reading the
+        // new directory takes as long as its files do, and the window is only
+        // so wide.
+        let rebuild = matches!(reason, Rewatch::Replaced).then_some(&*announced);
+        if let Some(at) = rebuild {
+            announce(at);
+        }
+
+        watched = watch_again(&mut debouncer, &root, &failures, rebuild);
 
         // Either way the page may be out of date: whatever was written while
         // there was no watch went unnoticed, and nothing else will announce
         // it.
         match reason {
             Rewatch::Replaced => {
-                if let Ok(mut at) = announced.lock() {
-                    *at = Some(Instant::now());
-                }
+                announce(&announced);
                 println!("  Directory replaced, reloading...");
             }
             Rewatch::WatchFailed => println!("  Watching again, reloading..."),
@@ -247,10 +260,15 @@ fn supervise<W: notify::Watcher>(
 /// Puts the watch back on whatever the name leads to now, and returns what
 /// that was. A build can take a while between removing the directory and
 /// writing the new one, so this waits rather than gives up.
+///
+/// With `rebuild`, the rebuild is marked as announced again once the old watch
+/// is off: a look that was in progress has ended by then, and what it found
+/// arrives shortly after.
 fn watch_again<W: notify::Watcher>(
     debouncer: &mut Debounced<W>,
     root: &Path,
     failures: &Receiver<()>,
+    rebuild: Option<&Mutex<Option<Instant>>>,
 ) -> Option<Watched> {
     loop {
         if !root.is_dir() {
@@ -261,6 +279,9 @@ fn watch_again<W: notify::Watcher>(
         // Let go of the old directory first: after a rename the watch is
         // still on it, reporting changes under its new name.
         let _ = debouncer.unwatch(root);
+        if let Some(at) = rebuild {
+            announce(at);
+        }
 
         // Anything waiting now is about the watcher just taken off, and this
         // recovery answers all of it. Drained before the new watch exists, so
@@ -270,7 +291,13 @@ fn watch_again<W: notify::Watcher>(
         // Looked at before watching again, for the same reason as at the
         // start.
         let looked_at = Watched::at(root);
-        if debouncer.watch(root, RecursiveMode::Recursive).is_ok() {
+        let watched = debouncer.watch(root, RecursiveMode::Recursive).is_ok();
+
+        // Looked at again afterwards. A poll reports a directory it cannot
+        // read as an event, not an error, so a watch put on one that went
+        // meanwhile comes back as success and finds nothing ever after. Both
+        // looks agreeing means the watch went on a directory still there.
+        if watched && looked_at.as_ref().map(|it| it.id) == directory_id(root) {
             return looked_at;
         }
 
@@ -283,7 +310,7 @@ fn watch_again<W: notify::Watcher>(
 /// Reading a file is an event of its own on Linux, so serving a page would
 /// count as a change, the browser would reload, and that reload would read
 /// the file again — forever.
-fn is_change(root: &Path, event: &DebouncedEvent, polling: bool) -> bool {
+fn is_change(ignored: &Ignored, root: &Path, event: &DebouncedEvent, polling: bool) -> bool {
     let written = match event.kind {
         EventKind::Create(_) | EventKind::Remove(_) | EventKind::Any => true,
         // How a poll says a file was written, where the write time moved; where
@@ -307,7 +334,7 @@ fn is_change(root: &Path, event: &DebouncedEvent, polling: bool) -> bool {
         EventKind::Access(_) | EventKind::Other => false,
     };
 
-    written && event.paths.iter().any(|path| !is_ignored(root, path))
+    written && event.paths.iter().any(|path| !ignored.contains(root, path))
 }
 
 /// The directory the watcher is attached to.
@@ -367,6 +394,29 @@ fn same_rebuild(poll: bool) -> Duration {
     hears_within + CHECK_INTERVAL
 }
 
+/// Marks a rebuild as announced as of now, so the watcher's own account of it
+/// is recognised as the echo it is.
+fn announce(at: &Mutex<Option<Instant>>) {
+    if let Ok(mut at) = at.lock() {
+        *at = Some(Instant::now());
+    }
+}
+
+/// True when a look found a build clearing the served directory: everything
+/// it saw was taken away, and the directory is not there now. The check
+/// announces the new one when it lands.
+///
+/// Only while polling. The system's own watcher hears of a removal at once,
+/// before the directory has had time to come back, so there a removal says
+/// nothing about a rebuild.
+fn clearing_the_directory(root: &Path, events: &[DebouncedEvent], polling: bool) -> bool {
+    polling
+        && events
+            .iter()
+            .all(|event| matches!(event.kind, EventKind::Remove(_)))
+        && !root.is_dir()
+}
+
 /// True when a rebuild was announced a moment ago, so what the watcher is
 /// reporting now is that same rebuild reaching it the slower way.
 fn just_announced(at: &Mutex<Option<Instant>>, within: Duration) -> bool {
@@ -377,43 +427,13 @@ fn just_announced(at: &Mutex<Option<Instant>>, within: Duration) -> bool {
     at.is_some_and(|when| when.elapsed() < within)
 }
 
-/// True for files the browser never sees: build and version-control
-/// directories, and the scratch files editors write while you type.
-///
-/// Only the part below `root` is checked, since the served directory may
-/// itself sit inside `target/` or `node_modules/`.
-fn is_ignored(root: &Path, path: &Path) -> bool {
-    // A path from outside the served directory is not ours to judge, and
-    // ignoring it would drop real changes.
-    let Ok(relative) = path.strip_prefix(root) else {
-        return false;
-    };
-
-    let unservable = relative.components().any(|component| match component {
-        Component::Normal(part) => {
-            let part = part.to_string_lossy();
-            is_hidden(&part) || IGNORED_DIRS.contains(&part.as_ref())
-        }
-        _ => false,
-    });
-
-    if unservable {
-        return true;
-    }
-
-    let Some(name) = relative.file_name().map(|name| name.to_string_lossy()) else {
-        return false;
-    };
-
-    IGNORED_SUFFIXES.iter().any(|suffix| name.ends_with(*suffix))
-        || IGNORED_NAMES.iter().any(|ignored| name == *ignored)
-        || (name.starts_with('#') && name.ends_with('#')) // emacs autosave copy
-        || name.contains("___jb_") // JetBrains, saving through a temporary copy
-}
-
 /// The whole line to print about what one look could not read, or nothing where
 /// saying anything would be noise.
-fn cannot_look(root: &Path, error: &notify_debouncer_full::notify::Error) -> Option<String> {
+fn cannot_look(
+    ignored: &Ignored,
+    root: &Path,
+    error: &notify_debouncer_full::notify::Error,
+) -> Option<String> {
     let Some(path) = error.paths.first() else {
         // Nothing to name. Not a watch that went down either: the next look
         // starts afresh.
@@ -425,7 +445,7 @@ fn cannot_look(root: &Path, error: &notify_debouncer_full::notify::Error) -> Opt
 
     // A path the browser never sees cannot change what it shows: a file in
     // node_modules this program may not read.
-    if is_ignored(root, path) {
+    if ignored.contains(root, path) {
         return None;
     }
 
@@ -503,73 +523,8 @@ mod tests {
 
     const ROOT: &str = "/site";
 
-    #[test]
-    fn build_directories_are_ignored() {
-        for path in [
-            "/site/.git/HEAD",
-            "/site/node_modules/left-pad/index.js",
-            "/site/target/debug/app",
-        ] {
-            assert!(is_ignored(Path::new(ROOT), Path::new(path)), "{path}");
-        }
-    }
-
-    #[test]
-    fn editor_scratch_files_are_ignored() {
-        for path in [
-            "/site/index.html.swp",
-            "/site/index.html~",
-            "/site/draft.tmp",
-            "/site/.#index.html",
-            "/site/#index.html#",
-            "/site/index.html___jb_tmp___",
-            "/site/4913",
-            "/site/.DS_Store",
-        ] {
-            assert!(is_ignored(Path::new(ROOT), Path::new(path)), "{path}");
-        }
-    }
-
-    #[test]
-    fn ordinary_files_are_not_ignored() {
-        for path in ["/site/index.html", "/site/assets/app.css", "/site/a~b/c.js"] {
-            assert!(!is_ignored(Path::new(ROOT), Path::new(path)), "{path}");
-        }
-    }
-
-    #[test]
-    fn only_the_part_below_the_root_is_judged() {
-        // The site itself may live inside a directory named target.
-        let root = Path::new("/project/target/site");
-        assert!(!is_ignored(root, Path::new("/project/target/site/app.css")));
-        assert!(is_ignored(root, Path::new("/project/target/site/target/x")));
-    }
-
-    #[test]
-    fn a_path_from_outside_the_root_is_left_alone() {
-        assert!(!is_ignored(
-            Path::new(ROOT),
-            Path::new("/elsewhere/app.css")
-        ));
-    }
-
-    #[test]
-    fn files_the_server_will_not_send_are_ignored() {
-        for path in [
-            "/site/.env",
-            "/site/.idea/workspace.xml",
-            "/site/.vscode/settings.json",
-        ] {
-            assert!(is_ignored(Path::new(ROOT), Path::new(path)), "{path}");
-        }
-    }
-
-    #[test]
-    fn changes_the_web_can_reach_are_not_ignored() {
-        assert!(!is_ignored(
-            Path::new(ROOT),
-            Path::new("/site/.well-known/token")
-        ));
+    fn nothing_chosen() -> Ignored {
+        Ignored::from(&[], &[]).expect("no patterns to refuse")
     }
 
     #[test]
@@ -579,7 +534,7 @@ mod tests {
             &["/site/index.html"],
         );
 
-        assert!(!is_change(Path::new(ROOT), &read, false));
+        assert!(!is_change(&nothing_chosen(), Path::new(ROOT), &read, false));
     }
 
     #[test]
@@ -589,7 +544,7 @@ mod tests {
             &["/site/index.html"],
         );
 
-        assert!(is_change(Path::new(ROOT), &saved, false));
+        assert!(is_change(&nothing_chosen(), Path::new(ROOT), &saved, false));
     }
 
     #[test]
@@ -601,8 +556,18 @@ mod tests {
             &["/site/index.html"],
         );
 
-        assert!(is_change(Path::new(ROOT), &rewritten, true));
-        assert!(!is_change(Path::new(ROOT), &rewritten, false));
+        assert!(is_change(
+            &nothing_chosen(),
+            Path::new(ROOT),
+            &rewritten,
+            true
+        ));
+        assert!(!is_change(
+            &nothing_chosen(),
+            Path::new(ROOT),
+            &rewritten,
+            false
+        ));
     }
 
     #[cfg(any(unix, windows))]
@@ -619,7 +584,7 @@ mod tests {
             &[root.to_str().unwrap()],
         );
 
-        assert!(!is_change(&root, &touched, true));
+        assert!(!is_change(&nothing_chosen(), &root, &touched, true));
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -631,19 +596,31 @@ mod tests {
             &["/site/index.html"],
         );
 
-        assert!(!is_change(Path::new(ROOT), &touched, false));
+        assert!(!is_change(
+            &nothing_chosen(),
+            Path::new(ROOT),
+            &touched,
+            false
+        ));
     }
 
     #[test]
     fn writing_creating_and_deleting_are_changes() {
         let root = Path::new(ROOT);
-        assert!(is_change(root, &written(&["/site/app.css"]), false));
         assert!(is_change(
+            &nothing_chosen(),
+            root,
+            &written(&["/site/app.css"]),
+            false
+        ));
+        assert!(is_change(
+            &nothing_chosen(),
             root,
             &event(EventKind::Create(CreateKind::File), &["/site/new.css"]),
             false
         ));
         assert!(is_change(
+            &nothing_chosen(),
             root,
             &event(EventKind::Remove(RemoveKind::File), &["/site/old.css"]),
             false
@@ -653,6 +630,7 @@ mod tests {
     #[test]
     fn writing_an_ignored_file_is_not_a_change() {
         assert!(!is_change(
+            &nothing_chosen(),
             Path::new(ROOT),
             &written(&["/site/app.css.swp"]),
             false
@@ -662,7 +640,7 @@ mod tests {
     #[test]
     fn one_real_file_among_ignored_ones_is_a_change() {
         let mixed = written(&["/site/app.css.swp", "/site/app.css"]);
-        assert!(is_change(Path::new(ROOT), &mixed, false));
+        assert!(is_change(&nothing_chosen(), Path::new(ROOT), &mixed, false));
     }
 
     #[test]
@@ -684,13 +662,18 @@ mod tests {
         let rewritten = Path::new("/site/app.css");
 
         assert_eq!(
-            cannot_look(root, &could_not_read(rewritten, ErrorKind::NotFound)),
+            cannot_look(
+                &nothing_chosen(),
+                root,
+                &could_not_read(rewritten, ErrorKind::NotFound)
+            ),
             None
         );
 
         // One that is there and cannot be read is worth saying, in words that
         // do not call a stylesheet a directory.
         let said = cannot_look(
+            &nothing_chosen(),
             root,
             &could_not_read(rewritten, ErrorKind::PermissionDenied),
         )
@@ -702,7 +685,8 @@ mod tests {
     #[test]
     fn trouble_with_no_path_is_not_a_watch_that_went_down() {
         let error = notify_debouncer_full::notify::Error::generic("a walk with no end");
-        let said = cannot_look(Path::new(ROOT), &error).expect("it should be reported");
+        let said =
+            cannot_look(&nothing_chosen(), Path::new(ROOT), &error).expect("it should be reported");
 
         assert!(!said.contains("Cannot watch for changes"), "{said}");
         assert!(said.contains("a walk with no end"), "{said}");

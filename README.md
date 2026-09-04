@@ -71,6 +71,7 @@ servio --open
 | `--poll` | off | Find changes by looking at the files, once a second |
 | `--cache-assets` | off | Cache files under `/assets/` for one year |
 | `--open` | off | Open the address in the browser |
+| `--ignore <PATTERN>` | none | Do not refresh the browser for changes matching this pattern; may be given more than once |
 
 If you do not specify a port and 3030 is busy, servio tries the next available
 port through 3039 and prints the selected address. If you specify a port,
@@ -83,12 +84,52 @@ names. That variable may be a whole command, with `%s` where the address goes:
 BROWSER="firefox --new-window %s" servio --open
 ```
 
-If no browser can be opened, servio says so and keeps serving.
+It may also name several, tried in turn until one starts, parted by `:` (`;` on
+Windows). Quote a path that has a space in it:
+
+```bash
+BROWSER="firefox:'/Applications/Firefox.app/Contents/MacOS/firefox' %s" servio --open
+```
+
+If no browser can be opened, or the one named stops at once with an error,
+servio says so and keeps serving. With `--poll`, the browser opens once the
+first look at the files is done.
 
 ## Live reload
 
 Saving a file refreshes the browser. servio ignores changes in hidden
 directories, `target`, `node_modules`, and common editor temporary files.
+
+`--ignore` adds patterns of your own, for a build that writes logs or a cache
+next to the pages:
+
+```bash
+servio --ignore "*.log" --ignore cache
+```
+
+A pattern is matched against the path below the served directory, written with
+`/`, and against every directory above it, so `cache` covers everything in
+`cache/`. A pattern with no `/` in it matches a name at any depth, as it does in
+`.gitignore`; one with a `/` starts from the served directory, so `build/*.log`
+is exactly one directory deep, and `/cache` is only the `cache` at the top. `*`
+stops at a `/`; `**` crosses any number of directories, and `tmp/**` covers
+`tmp` itself as well. On macOS and Windows, where the disk does not tell
+`Build.LOG` from `build.log`, neither does a pattern. The files are still
+served, and `--poll` still reads them: the pattern only decides what refreshes
+the browser.
+
+Patterns used on every run belong in a file called `.servioignore` in the
+served directory, one to a line, with `#` starting a comment:
+
+```
+# what the build writes next to the pages
+*.log
+cache
+```
+
+The file is read once, when the server starts. Being hidden, it is never
+served, and editing it does not refresh the browser. Its patterns and those
+from `--ignore` apply together, and the banner says how many it added.
 
 Live reload continues working when a build replaces the served directory. On
 macOS, changing file permissions may also trigger one refresh because of how
@@ -117,8 +158,8 @@ Links are not followed. The server refuses to hand out anything outside the
 served directory, so a link leading out cannot change what the browser sees,
 and one leading back in points at files each look reads anyway.
 
-`--poll` cannot be combined with `--no-reload`, which turns off watching
-altogether.
+Neither `--poll` nor `--ignore` can be combined with `--no-reload`, which
+turns off watching altogether.
 
 ## Single-page apps
 

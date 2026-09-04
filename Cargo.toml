@@ -31,6 +31,8 @@ http = "1"
 file-id = "0.2"
 # Finds the browser, on each system's own terms.
 open = "5"
+# Reads the patterns given to --ignore.
+globset = "0.4"
 
 [profile.release]
 lto = true

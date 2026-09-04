@@ -251,6 +251,60 @@ fn a_rebuild_is_announced_once_while_polling() {
 }
 
 #[test]
+fn a_slow_rebuild_is_announced_once_while_polling() {
+    // A build that pauses between clearing the directory and writing the new
+    // one lets a look land in the gap. That look finds every file gone, which
+    // is the rebuild starting, not a change of its own.
+    let dir = site("slow-rebuild-polling");
+    let server = Server::start(dir.path(), &["--poll"]);
+    server.settle();
+
+    dir.remove_all();
+    std::thread::sleep(A_LOOK);
+    dir.create();
+    dir.write("index.html", "<html>rebuilt</html>");
+    server.wait_for("Directory replaced");
+
+    // Long enough for the poll's own account of the rebuild to have arrived,
+    // and for the window in which a change counts as that rebuild to close.
+    std::thread::sleep(Duration::from_millis(2000));
+    assert_eq!(
+        server.count("File changed"),
+        0,
+        "the rebuild was announced twice:\n{}",
+        server.lines().join("\n")
+    );
+
+    // What must not be lost: editing after a rebuild still says so.
+    dir.write("index.html", "<html>edited</html>");
+    server.wait_for("File changed");
+}
+
+#[test]
+fn while_polling_a_directory_taken_away_does_not_refresh_to_an_error_page() {
+    // Nothing can load from a directory that is not there, so the page on
+    // screen, the last one that could load, is left alone.
+    let dir = site("taken-away-polling");
+    let server = Server::start(dir.path(), &["--poll"]);
+    server.settle();
+
+    let before = server.reloads();
+    dir.remove_all();
+    server.expect_no_reload_within(before, A_LOOK);
+    assert!(
+        !server.said("File changed"),
+        "a directory taken away was called a change:\n{}",
+        server.lines().join("\n")
+    );
+
+    // Put back, the check says so, once, and the page loads again.
+    dir.create();
+    dir.write("index.html", "<html>rebuilt</html>");
+    server.wait_for("Directory replaced");
+    server.wait_for_reloads(before + 1);
+}
+
+#[test]
 fn a_connected_browser_is_told_to_refresh() {
     let dir = site("connected");
     let server = Server::start(dir.path(), &[]);
@@ -298,6 +352,62 @@ fn editor_scratch_files_are_ignored() {
     dir.write("node_modules/left-pad/index.js", "module.exports = 1");
 
     server.expect_no_reload(before);
+}
+
+#[test]
+fn a_change_matching_an_ignore_pattern_does_not_refresh() {
+    // A build that writes a log next to the page would otherwise refresh the
+    // browser for every line of it.
+    let dir = site("ignore");
+    // The directory is there from the start: making one is a change of its own.
+    dir.write("out/build.log", "");
+    let server = Server::start(dir.path(), &["--ignore", "*.log", "--ignore", "cache"]);
+    server.settle();
+
+    let before = server.reloads();
+    dir.write("build.log", "compiled");
+    dir.write("out/build.log", "compiled");
+    dir.write("cache/pages/index.html", "<html>cached</html>");
+
+    server.expect_no_reload(before);
+
+    // Everything else still does.
+    dir.write("app.css", "body { color: red }");
+    server.wait_for_reloads(before + 1);
+}
+
+#[test]
+fn the_ignore_file_in_the_served_directory_is_read() {
+    let dir = site("ignore-file");
+    dir.write(".servioignore", "# what the build writes\n*.log\ncache\n");
+    let server = Server::start(dir.path(), &["--ignore", "*.map"]);
+    server.settle();
+
+    let before = server.reloads();
+    dir.write("build.log", "compiled");
+    dir.write("cache/pages/index.html", "<html>cached</html>");
+    dir.write("app.css.map", "{}");
+    // The file itself is hidden, so editing it does not refresh either.
+    dir.write(".servioignore", "*.log\n");
+
+    server.expect_no_reload(before);
+
+    dir.write("app.css", "body { color: red }");
+    server.wait_for_reloads(before + 1);
+}
+
+#[test]
+fn a_change_matching_an_ignore_pattern_does_not_refresh_while_polling() {
+    let dir = site("ignore-polling");
+    let server = Server::start(dir.path(), &["--poll", "--ignore", "*.log"]);
+    server.settle();
+
+    let before = server.reloads();
+    dir.write("build.log", "compiled");
+    server.expect_no_reload_within(before, A_LOOK);
+
+    dir.write("app.css", "body { color: red }");
+    server.wait_for_reloads(before + 1);
 }
 
 #[test]

@@ -65,7 +65,38 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        if std::fs::remove_dir_all(&self.path).is_ok() {
+            return;
+        }
+
+        // A test that closed a directory to see what the server says leaves
+        // one nothing can remove. Opened again, so the run leaves nothing
+        // behind in the system's temporary directory.
+        #[cfg(unix)]
+        {
+            open_again(&self.path);
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+/// Opens `path` and everything below it, as far as it can be read.
+#[cfg(unix)]
+fn open_again(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        // The kind of the entry itself, not of what a link leads to: the tests
+        // make one that leads to a directory above, and following it would
+        // walk without end.
+        let is_directory = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if is_directory {
+            open_again(&entry.path());
+        }
     }
 }
 

@@ -193,6 +193,149 @@ fn looking_at_the_files_and_not_watching_at_all_is_refused() {
     assert!(said.contains("--no-reload"), "{said}");
 }
 
+#[test]
+fn ignoring_and_not_watching_at_all_is_refused() {
+    // There is nothing to ignore a change from when nothing is watched.
+    let dir = TempDir::new("ignore-and-no-reload");
+    dir.write("index.html", "<html>hi</html>");
+
+    let (said, ok) = run(&[
+        "--dir",
+        dir.path().to_str().unwrap(),
+        "--ignore",
+        "*.log",
+        "--no-reload",
+    ]);
+
+    assert!(!ok);
+    assert!(
+        said.contains("--ignore"),
+        "it should say which flags: {said}"
+    );
+    assert!(said.contains("--no-reload"), "{said}");
+}
+
+#[test]
+fn a_broken_ignore_pattern_is_refused_in_plain_words() {
+    let dir = TempDir::new("broken-ignore");
+    dir.write("index.html", "<html>hi</html>");
+
+    let (said, ok) = run(&["--dir", dir.path().to_str().unwrap(), "--ignore", "[abc"]);
+
+    assert!(!ok);
+    assert!(
+        said.contains("cannot ignore \"[abc\": a [ has no ] to close it"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_broken_line_of_the_ignore_file_is_refused_by_its_number() {
+    let dir = TempDir::new("broken-ignore-file");
+    dir.write("index.html", "<html>hi</html>");
+    dir.write(".servioignore", "*.log\n\n[abc\n");
+
+    let (said, ok) = run(&["--dir", dir.path().to_str().unwrap()]);
+
+    assert!(!ok);
+    assert!(
+        said.contains("cannot ignore \"[abc\", line 3 of .servioignore: a [ has no ] to close it"),
+        "{said}"
+    );
+}
+
+#[test]
+fn the_ignore_file_is_left_alone_when_nothing_is_watched() {
+    // With no watcher there is nothing for it to say, so a broken one cannot
+    // stop a server that would never have read it.
+    let dir = TempDir::new("ignore-file-no-reload");
+    dir.write("index.html", "<html>hi</html>");
+    dir.write(".servioignore", "[abc\n");
+
+    let server = Server::start(dir.path(), &["--no-reload"]);
+
+    assert!(server.said("Serving"));
+    assert!(!server.said("Ignoring"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_served_directory_that_cannot_be_read_is_not_blamed_on_the_ignore_file() {
+    // Nobody wrote a .servioignore here, so naming one would send the reader
+    // looking for a file that does not exist.
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new("closed-to-us");
+    dir.write("index.html", "<html>hi</html>");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o000))
+        .expect("could not close the directory");
+
+    let (said, _) = run(&["--dir", dir.path().to_str().unwrap(), "--poll"]);
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("could not open the directory again");
+
+    assert!(!said.contains(".servioignore"), "{said}");
+}
+
+#[test]
+fn an_ignore_file_that_is_a_directory_is_refused_in_plain_words() {
+    let dir = TempDir::new("ignore-file-is-a-directory");
+    dir.write("index.html", "<html>hi</html>");
+    std::fs::create_dir(dir.join(".servioignore")).expect("could not create the directory");
+
+    let (said, ok) = run(&["--dir", dir.path().to_str().unwrap()]);
+
+    assert!(!ok);
+    assert!(said.contains("it is a directory, not a file"), "{said}");
+    assert!(!said.contains("os error"), "{said}");
+}
+
+#[test]
+fn a_mark_at_the_start_of_the_ignore_file_is_not_part_of_a_pattern() {
+    // Some editors on Windows write one, and it would otherwise make the
+    // first pattern match nothing.
+    let dir = TempDir::new("ignore-file-bom");
+    dir.write("index.html", "<html>hi</html>");
+    dir.write(".servioignore", "\u{feff}*.log\ncache\n");
+
+    let server = Server::start(dir.path(), &[]);
+    server.settle();
+
+    let before = server.reloads();
+    dir.write("build.log", "compiled");
+    server.expect_no_reload(before);
+}
+
+#[test]
+fn says_how_many_patterns_the_ignore_file_added() {
+    let dir = TempDir::new("ignore-file-banner");
+    dir.write("index.html", "<html>hi</html>");
+    dir.write(".servioignore", "*.log\ncache\n");
+
+    let server = Server::start(dir.path(), &["--ignore", "*.map"]);
+
+    assert!(
+        server.said("*.map, 2 patterns in .servioignore"),
+        "the banner should say what it is ignoring:\n{}",
+        server.lines().join("\n")
+    );
+}
+
+#[test]
+fn says_what_it_is_ignoring_on_the_way_up() {
+    let dir = TempDir::new("ignore-banner");
+    dir.write("index.html", "<html>hi</html>");
+
+    let server = Server::start(dir.path(), &["--ignore", "*.log", "--ignore", "cache"]);
+
+    assert!(
+        server.said("Ignoring") && server.said("*.log, cache"),
+        "the banner should list the patterns:\n{}",
+        server.lines().join("\n")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn opens_an_address_a_browser_can_open() {
@@ -276,6 +419,25 @@ fn a_browser_named_with_its_own_arguments_still_opens() {
         wait_for_a_line(&opened, &server),
         format!("--new-window http://localhost:{}", server.port)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_browser_that_stops_at_once_with_an_error_is_reported() {
+    // `firefox --no-such-flag` prints its usage and stops: started, as far as
+    // the system can tell, and not opened at all.
+    let dir = TempDir::new("browser-stops");
+    dir.write("index.html", "<html>hi</html>");
+
+    let server = Server::start_in(dir.path(), &["--open"], &[("BROWSER", "false")]);
+    server.wait_for("Cannot open a browser");
+
+    assert!(
+        server.said("false stopped with an error"),
+        "{}",
+        server.lines().join("\n")
+    );
+    assert_eq!(get(server.port, "/").status, 200);
 }
 
 #[cfg(unix)]
