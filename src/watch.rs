@@ -58,18 +58,12 @@ enum Rewatch {
 pub(crate) fn start(root: &Path, poll: bool, ignored: Ignored, reloader: Reloader) -> Result<()> {
     let (failed, failures) = mpsc::channel();
 
-    // When a rebuild was last announced. The check notices a new directory
-    // within one look, while the watcher's account of the same rebuild takes
-    // until it next hears anything, so the announcement comes first and the
-    // watcher can recognise the echo of it.
-    let announced = Arc::new(Mutex::new(None::<Instant>));
-
+    let rebuilds = Rebuilds::new(poll);
     let report = report_changes(
         root.to_path_buf(),
         poll,
         ignored,
-        Arc::clone(&announced),
-        same_rebuild(poll),
+        rebuilds.clone(),
         reloader.clone(),
         failed,
     );
@@ -97,12 +91,40 @@ pub(crate) fn start(root: &Path, poll: bool, ignored: Ignored, reloader: Reloade
         )
         .map_err(|error| cannot_watch_here(root, &error))?;
 
-        keep_watching(debouncer, root, failures, announced, reloader)
+        keep_watching(debouncer, root, failures, rebuilds, reloader)
     } else {
         let debouncer = new_debouncer(DEBOUNCE_DELAY, None, report)
             .map_err(|error| cannot_watch_here(root, &error))?;
 
-        keep_watching(debouncer, root, failures, announced, reloader)
+        keep_watching(debouncer, root, failures, rebuilds, reloader)
+    }
+}
+
+/// What tells a rebuild apart from a change of its own, shared between the
+/// watcher and the check.
+#[derive(Clone)]
+struct Rebuilds {
+    /// When a rebuild was last announced. The check notices a new directory
+    /// within one look, while the watcher's account of the same rebuild takes
+    /// until it next hears anything, so the announcement comes first and the
+    /// watcher can recognise the echo of it.
+    announced: Arc<Mutex<Option<Instant>>>,
+    /// Which directory the watch is on, by the system's number for it. The
+    /// watch follows the directory and not the name, so the watcher compares
+    /// this with what the name leads to now before reporting anything.
+    watching: Arc<Mutex<Option<FileId>>>,
+    /// How long the watcher's account of a rebuild goes on arriving after the
+    /// announcement.
+    same_rebuild: Duration,
+}
+
+impl Rebuilds {
+    fn new(poll: bool) -> Rebuilds {
+        Rebuilds {
+            announced: Arc::new(Mutex::new(None)),
+            watching: Arc::new(Mutex::new(None)),
+            same_rebuild: same_rebuild(poll),
+        }
     }
 }
 
@@ -111,8 +133,7 @@ fn report_changes(
     root: PathBuf,
     polling: bool,
     ignored: Ignored,
-    announced: Arc<Mutex<Option<Instant>>>,
-    same_rebuild: Duration,
+    rebuilds: Rebuilds,
     changed: Reloader,
     failed: mpsc::Sender<()>,
 ) -> impl FnMut(DebounceEventResult) + Send + 'static {
@@ -122,11 +143,11 @@ fn report_changes(
 
     move |result| match result {
         Ok(events) => {
-            // A build clearing the served directory is the check's to report,
-            // once, when the new one lands. Nothing is refreshed on the way:
-            // the page cannot load from a directory that is not there, and the
-            // one on screen is still the last that could.
-            if clearing_the_directory(&root, &events, polling) {
+            // A rebuild is the check's to report, once, when the new
+            // directory is there. Nothing is refreshed on the way: the page
+            // cannot load from a directory that is not there, and the one on
+            // screen is still the last that could.
+            if replaced_under_the_watch(&rebuilds.watching, &root) {
                 return;
             }
 
@@ -136,7 +157,7 @@ fn report_changes(
             {
                 // These events are the rebuild just announced, and one rebuild
                 // deserves one line. The page is refreshed either way.
-                if !just_announced(&announced, same_rebuild) {
+                if !just_announced(&rebuilds.announced, rebuilds.same_rebuild) {
                     println!("  File changed, reloading...");
                 }
                 changed.reload();
@@ -175,7 +196,7 @@ fn keep_watching<W: notify::Watcher + Send + 'static>(
     mut debouncer: Debounced<W>,
     root: &Path,
     failures: Receiver<()>,
-    announced: Arc<Mutex<Option<Instant>>>,
+    rebuilds: Rebuilds,
     reloader: Reloader,
 ) -> Result<()> {
     // Look first, then watch. The other way round, a directory replaced in
@@ -191,10 +212,11 @@ fn keep_watching<W: notify::Watcher + Send + 'static>(
     // nothing ever after. When the two looks disagree, nothing is known to be
     // watched, and the check puts that right.
     let first_look = first_look.filter(|it| Some(it.id) == directory_id(root));
+    remember(&rebuilds.watching, &first_look);
 
     let root = root.to_path_buf();
     std::thread::spawn(move || {
-        supervise(debouncer, root, failures, first_look, announced, reloader)
+        supervise(debouncer, root, failures, first_look, rebuilds, reloader)
     });
 
     Ok(())
@@ -209,7 +231,7 @@ fn supervise<W: notify::Watcher>(
     root: PathBuf,
     failures: Receiver<()>,
     mut watched: Option<Watched>,
-    announced: Arc<Mutex<Option<Instant>>>,
+    rebuilds: Rebuilds,
     reloader: Reloader,
 ) {
     loop {
@@ -232,6 +254,7 @@ fn supervise<W: notify::Watcher>(
                     // name, quietly: nothing is known to have changed.
                     None => {
                         watched = watch_again(&mut debouncer, &root, &failures, None);
+                        remember(&rebuilds.watching, &watched);
                         continue;
                     }
                 }
@@ -242,19 +265,20 @@ fn supervise<W: notify::Watcher>(
         // look may be in progress when the old watch comes off, reading the
         // new directory takes as long as its files do, and the window is only
         // so wide.
-        let rebuild = matches!(reason, Rewatch::Replaced).then_some(&*announced);
+        let rebuild = matches!(reason, Rewatch::Replaced).then_some(&*rebuilds.announced);
         if let Some(at) = rebuild {
             announce(at);
         }
 
         watched = watch_again(&mut debouncer, &root, &failures, rebuild);
+        remember(&rebuilds.watching, &watched);
 
         // Either way the page may be out of date: whatever was written while
         // there was no watch went unnoticed, and nothing else will announce
         // it.
         match reason {
             Rewatch::Replaced => {
-                announce(&announced);
+                announce(&rebuilds.announced);
                 println!("  Directory replaced, reloading...");
             }
             Rewatch::WatchFailed => println!("  Watching again, reloading..."),
@@ -408,19 +432,34 @@ fn announce(at: &Mutex<Option<Instant>>) {
     }
 }
 
-/// True when a look found a build clearing the served directory: everything
-/// it saw was taken away, and the directory is not there now. The check
-/// announces the new one when it lands.
+/// Tells the watcher which directory the watch is on now.
+fn remember(watching: &Mutex<Option<FileId>>, watched: &Option<Watched>) {
+    if let Ok(mut watching) = watching.lock() {
+        *watching = watched.as_ref().map(|it| it.id);
+    }
+}
+
+/// True when the name no longer leads to the directory the watch is on: a
+/// build has taken the served directory away, or has written the new one and
+/// the check has not looked yet. Whatever the watcher reports then is that
+/// rebuild, and it is the check's to announce; said here as well, one rebuild
+/// would be announced twice.
 ///
-/// Only while polling. The system's own watcher hears of a removal at once,
-/// before the directory has had time to come back, so there a removal says
-/// nothing about a rebuild.
-fn clearing_the_directory(root: &Path, events: &[DebouncedEvent], polling: bool) -> bool {
-    polling
-        && events
-            .iter()
-            .all(|event| matches!(event.kind, EventKind::Remove(_)))
-        && !root.is_dir()
+/// A directory that is there but cannot be read is not one that went. The
+/// check has no number to compare either, so what the watcher found is
+/// reported as the change it is rather than going unsaid.
+fn replaced_under_the_watch(watching: &Mutex<Option<FileId>>, root: &Path) -> bool {
+    // The lock is let go before the look: on a network share the look takes
+    // its time, and the check needs the lock to say where the watch is now.
+    let Some(watched) = watching.lock().ok().and_then(|watching| *watching) else {
+        return false;
+    };
+
+    match file_id::get_file_id(root) {
+        Ok(now) => now != watched,
+        // Not there: a build between the old directory and the new one.
+        Err(trouble) => trouble.kind() == ErrorKind::NotFound,
+    }
 }
 
 /// True when a rebuild was announced a moment ago, so what the watcher is
@@ -723,5 +762,68 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&path).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn what_the_watcher_reports_is_left_to_the_check_once_the_directory_is_replaced() {
+        let path = std::env::temp_dir().join(format!("servio-replaced-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+
+        // Kept, so that the system cannot give the rebuilt directory the same
+        // number.
+        let watched = Watched::at(&path).expect("could not look at the directory");
+        let watching = Mutex::new(Some(watched.id));
+        assert!(
+            !replaced_under_the_watch(&watching, &path),
+            "the directory at the name is the one watched"
+        );
+
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(
+            replaced_under_the_watch(&watching, &path),
+            "taken away, and the check says when it is back"
+        );
+
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(
+            replaced_under_the_watch(&watching, &path),
+            "rebuilt, and the check has not looked yet"
+        );
+
+        // Nothing known to be watched, so there is nothing to compare.
+        assert!(!replaced_under_the_watch(&Mutex::new(None), &path));
+
+        std::fs::remove_dir_all(&path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_cannot_be_read_is_not_one_that_went() {
+        // Nothing else would report the change: the check gives up on a
+        // number it cannot read.
+        use std::os::unix::fs::PermissionsExt;
+
+        let above = std::env::temp_dir().join(format!("servio-unreadable-{}", std::process::id()));
+        let path = above.join("site");
+        let _ = std::fs::remove_dir_all(&above);
+        std::fs::create_dir_all(&path).unwrap();
+        let mode = |mode| std::fs::set_permissions(&above, std::fs::Permissions::from_mode(mode));
+
+        let watched = Watched::at(&path).expect("could not look at the directory");
+        let watching = Mutex::new(Some(watched.id));
+        mode(0o000).unwrap();
+        let went = replaced_under_the_watch(&watching, &path);
+
+        // Put back before anything can fail, so the directory can be cleared
+        // afterwards.
+        mode(0o755).unwrap();
+        assert!(
+            !went,
+            "a directory that could not be read was taken for one that went"
+        );
+
+        std::fs::remove_dir_all(&above).unwrap();
     }
 }

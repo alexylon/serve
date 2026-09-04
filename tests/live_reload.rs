@@ -305,6 +305,30 @@ fn while_polling_a_directory_taken_away_does_not_refresh_to_an_error_page() {
 }
 
 #[test]
+fn a_directory_taken_away_does_not_refresh_to_an_error_page() {
+    // The system's watcher hears of the removal at once, before a build has
+    // had time to write the new directory. Left to the check, as with `--poll`.
+    let dir = site("taken-away");
+    let server = Server::start(dir.path(), &[]);
+    server.settle();
+
+    let before = server.reloads();
+    dir.remove_all();
+    server.expect_no_reload_within(before, A_LOOK);
+    assert!(
+        !server.said("File changed"),
+        "a directory taken away was called a change:\n{}",
+        server.lines().join("\n")
+    );
+
+    // Put back, the check says so, once, and the page loads again.
+    dir.create();
+    dir.write("index.html", "<html>rebuilt</html>");
+    server.wait_for("Directory replaced");
+    server.wait_for_reloads(before + 1);
+}
+
+#[test]
 fn a_connected_browser_is_told_to_refresh() {
     let dir = site("connected");
     let server = Server::start(dir.path(), &[]);

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+- A rebuild was announced twice, and the browser refreshed to an error page on
+  the way, when the watcher's account of the old directory going reached it
+  before the check had seen the new one. What the watcher reports about a
+  directory no longer at the name is now left to the check
+- Without `--poll`, a directory taken away refreshed the browser to an error
+  page. The page on screen is now kept, as it is with `--poll`, until the
+  directory is back
+
 ## [0.6.0] - 2026-09-04
 
 ### Added
