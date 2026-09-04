@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-04
+
 ### Added
 - `--poll` finds changes by looking at the files once a second, reading each of
   them, for network shares, folders shared with a virtual machine, and
