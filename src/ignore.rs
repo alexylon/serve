@@ -161,6 +161,17 @@ impl Ignored {
 /// removed is not a change either.
 fn globs_for(pattern: &str) -> std::result::Result<Vec<Glob>, String> {
     let given = pattern.trim();
+    // `C:\site\cache` or `\\server\share\cache` could never match, and
+    // saying so beats silence.
+    if matches!(
+        Path::new(given).components().next(),
+        Some(Component::Prefix(_))
+    ) {
+        return Err(
+            "a pattern starts from the served directory, not from a drive or another machine"
+                .to_string(),
+        );
+    }
     // A leading `/` or `./` pins the pattern to the served directory, as it
     // does in `.gitignore`: `/cache` is the one at the top, `cache` any.
     let (pinned, bare) = match after_a_leading_separator(given) {
@@ -170,13 +181,6 @@ fn globs_for(pattern: &str) -> std::result::Result<Vec<Glob>, String> {
     let bare = bare.trim_end_matches(is_separator);
     if bare.is_empty() {
         return Err("it names nothing".to_string());
-    }
-    // `C:\site\cache` could never match, and saying so beats silence.
-    if matches!(
-        Path::new(bare).components().next(),
-        Some(Component::Prefix(_))
-    ) {
-        return Err("a pattern starts from the served directory, not from a drive".to_string());
     }
     // `../build`: nothing above the served directory is watched, and nothing
     // there could refresh the browser.
@@ -189,8 +193,13 @@ fn globs_for(pattern: &str) -> std::result::Result<Vec<Glob>, String> {
     if bare == "." {
         return Err("a \".\" is the served directory, which is never ignored".to_string());
     }
-    if parts.any(|part| part == ".") {
+    if parts.clone().any(|part| part == ".") {
         return Err("a \".\" in the middle names nothing, so leave it out".to_string());
+    }
+    // `//cache`, `build//x`: the empty name between two separators matches
+    // nothing.
+    if parts.any(str::is_empty) {
+        return Err("a \"//\" names nothing, so leave one of them out".to_string());
     }
     // `!keep.log` keeps a file back in a .gitignore. There is no such rule
     // here, so it would quietly look for a name starting with `!`.
@@ -522,12 +531,27 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn a_pattern_starting_from_a_drive_is_refused() {
-        let said = Ignored::from(&[r"C:\site\cache".to_string()], &[])
-            .err()
-            .expect("a drive should be refused")
-            .to_string();
-        assert!(said.contains("not from a drive"), "{said}");
+    fn a_pattern_starting_from_a_drive_or_another_machine_is_refused() {
+        for pattern in [r"C:\site\cache", r"\\server\share\cache"] {
+            let said = Ignored::from(&[pattern.to_string()], &[])
+                .err()
+                .unwrap_or_else(|| panic!("{pattern} should be refused"))
+                .to_string();
+            assert!(said.contains("not from a drive"), "{said}");
+        }
+    }
+
+    #[test]
+    fn a_pattern_with_a_separator_too_many_is_refused() {
+        // It used to be accepted as the glob `/cache`, which no path below
+        // the served directory can match.
+        for pattern in ["//cache", ".//cache", "build//*.log"] {
+            let said = Ignored::from(&[pattern.to_string()], &[])
+                .err()
+                .unwrap_or_else(|| panic!("{pattern} should be refused"))
+                .to_string();
+            assert!(said.contains("names nothing"), "{pattern}: {said}");
+        }
     }
 
     #[test]

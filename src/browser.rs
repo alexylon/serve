@@ -2,16 +2,32 @@
 
 use std::io::ErrorKind;
 use std::path::is_separator;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// How soon a browser that could not open stops. One that stops later was
 /// open, and however it stops then is nobody's business here.
 const GIVES_UP_WITHIN: Duration = Duration::from_secs(2);
 
+/// How long to wait for a browser to fall over when there is another to try.
+/// Long enough for a locked profile or an unknown flag to be refused, short
+/// enough not to keep anyone waiting.
+const STUMBLES_WITHIN: Duration = Duration::from_millis(300);
+
+/// How often to look while waiting for that.
+const A_MOMENT: Duration = Duration::from_millis(20);
+
 /// Opens `url` in a browser `BROWSER` names, or in the usual one. A browser
 /// that will not open is worth a line, not a stop: the banner has the address.
+///
+/// On a thread of its own, so that trying a list never holds up the server.
 pub(crate) fn open(url: &str) {
+    let url = url.to_string();
+    std::thread::spawn(move || open_it(&url));
+}
+
+/// Whatever `BROWSER` names, tried in turn, or the usual browser.
+fn open_it(url: &str) {
     let named = std::env::var("BROWSER").unwrap_or_default();
     let chosen: Vec<&str> = browsers(&named).collect();
     if chosen.is_empty() {
@@ -21,13 +37,13 @@ pub(crate) fn open(url: &str) {
         return;
     }
 
-    // Each in turn, and the first that starts wins.
+    // Each in turn, and the first that opens the address wins.
     let mut refused = Vec::new();
-    for browser in chosen {
+    for (at, browser) in chosen.iter().enumerate() {
         let (program, arguments) = command_line(browser, url);
-        match run(&program, &arguments) {
+        match run(&program, &arguments, at + 1 < chosen.len()) {
             Ok(()) => return,
-            Err(error) => refused.push((program, error)),
+            Err(refusal) => refused.push(refusal),
         }
     }
 
@@ -46,8 +62,12 @@ fn browsers(named: &str) -> impl Iterator<Item = &str> {
         .filter(|browser| !browser.is_empty())
 }
 
-/// Starts the browser and leaves it running.
-fn run(program: &str, arguments: &[String]) -> std::io::Result<()> {
+/// Starts the browser and leaves it running, or says why it opened nothing.
+///
+/// With `another` to try, this waits a moment first: a browser that stops at
+/// once opened nothing, and the next one still can. The last one is left to
+/// the thread below, there being nothing to fall back on.
+fn run(program: &str, arguments: &[String], another: bool) -> Result<(), String> {
     let mut command = Command::new(program);
     command
         .args(arguments)
@@ -63,9 +83,15 @@ fn run(program: &str, arguments: &[String]) -> std::io::Result<()> {
         command.process_group(0);
     }
 
-    let mut browser = command.spawn()?;
+    let mut browser = command
+        .spawn()
+        .map_err(|error| why(Some(program), &error))?;
     let started = Instant::now();
     let program = program.to_string();
+
+    if another && stumbled(&mut browser) {
+        return Err(format!("{program} stopped with an error"));
+    }
 
     // Waited on from a thread: unwaited, a closed browser lingers in the
     // system's list of processes until the server stops, and waiting here
@@ -84,6 +110,23 @@ fn run(program: &str, arguments: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// True when the browser stops with an error within the moment: a wrong flag,
+/// a locked profile. One still running, or one that stopped happily after
+/// handing the address to a window already open, did its job.
+fn stumbled(browser: &mut Child) -> bool {
+    let waited = Instant::now();
+
+    while waited.elapsed() < STUMBLES_WITHIN {
+        match browser.try_wait() {
+            Ok(Some(status)) => return !status.success(),
+            Ok(None) => std::thread::sleep(A_MOMENT),
+            Err(_) => return false,
+        }
+    }
+
+    false
+}
+
 /// The program and its arguments, with `%s` standing for the address as it
 /// does elsewhere. Without a `%s`, the address goes last.
 fn command_line(browser: &str, url: &str) -> (String, Vec<String>) {
@@ -100,11 +143,11 @@ fn command_line(browser: &str, url: &str) -> (String, Vec<String>) {
     (program, arguments)
 }
 
-/// The words of a command line. Whitespace parts them. A quote at the start of
-/// a word holds it together to the matching one, and outside quotes `\` holds
-/// the character after it: two ways to write a name with a space in it. A
-/// quote inside a word is an ordinary character, so a name may hold an
-/// apostrophe.
+/// The words of a command line. Whitespace parts them; a quote, anywhere in a
+/// word, holds everything up to its match together; outside quotes `\` holds
+/// the character after it. Two ways to write a space, in a name or in
+/// `--profile-directory="Profile 1"`. As in a shell, a name with an apostrophe
+/// in it has to be quoted whole or written with `\'`.
 ///
 /// On Windows `\` parts directories, so it stands for itself there and quotes
 /// are the one way to hold a name together.
@@ -125,7 +168,7 @@ fn words(line: &str) -> Vec<String> {
                     started = true;
                 }
             }
-            (None, '"' | '\'') if !started => {
+            (None, '"' | '\'') => {
                 quote = Some(character);
                 started = true;
             }
@@ -164,11 +207,11 @@ fn why(program: Option<&str>, error: &std::io::Error) -> String {
     }
 }
 
-/// Why none of the browsers named opened. One is named and explained; of
-/// several, naming each would be a paragraph, so they are counted.
-fn why_none_of_them(refused: &[(String, std::io::Error)]) -> String {
+/// Why none of the browsers named opened the address. One is explained;
+/// several would be a paragraph, so they are counted.
+fn why_none_of_them(refused: &[String]) -> String {
     match refused {
-        [(program, error)] => why(Some(program), error),
+        [only] => only.clone(),
         many => format!(
             "none of the {} browsers BROWSER names would run",
             many.len()
@@ -218,10 +261,19 @@ mod tests {
     }
 
     #[test]
-    fn an_apostrophe_in_a_name_is_an_ordinary_character() {
-        // It used to be read as an opening quote, and everything after it,
-        // the address included, became one word.
-        let (program, arguments) = command_line("/opt/o'brien/browser %s", URL);
+    fn quotes_hold_a_space_inside_a_word_together() {
+        // Quotes used to count only at the start of a word, and this came
+        // apart into a wrong flag and a stray argument.
+        let (program, arguments) =
+            command_line(r#"chromium --profile-directory="Profile 1" %s"#, URL);
+
+        assert_eq!(program, "chromium");
+        assert_eq!(arguments, ["--profile-directory=Profile 1", URL]);
+    }
+
+    #[test]
+    fn an_apostrophe_in_a_name_is_held_back_by_quoting_the_name() {
+        let (program, arguments) = command_line(r#""/opt/o'brien/browser" %s"#, URL);
 
         assert_eq!(program, "/opt/o'brien/browser");
         assert_eq!(arguments, [URL]);
@@ -274,17 +326,14 @@ mod tests {
 
     #[test]
     fn one_browser_that_will_not_run_is_named_and_several_are_counted() {
-        let missing = || std::io::Error::from(ErrorKind::NotFound);
+        let missing = |program| why(Some(program), &std::io::Error::from(ErrorKind::NotFound));
 
         assert_eq!(
-            why_none_of_them(&[("firefox".to_string(), missing())]),
+            why_none_of_them(&[missing("firefox")]),
             "there is no program called firefox"
         );
         assert_eq!(
-            why_none_of_them(&[
-                ("firefox".to_string(), missing()),
-                ("chromium".to_string(), missing()),
-            ]),
+            why_none_of_them(&[missing("firefox"), missing("chromium")]),
             "none of the 2 browsers BROWSER names would run"
         );
     }

@@ -116,14 +116,22 @@ async fn run() -> Result<()> {
     let bound = listener
         .local_addr()
         .context("cannot tell which address the server is listening on")?;
-    banner::print(bound, &args, &static_dir, no_app_page, from_ignore_file);
-
-    // Watched once the address is on screen: a poll reads every file before it
-    // starts, which on the folders it is for can take a while. The port is
+    // While polling, the address goes up first: the first look reads every
+    // file, which on the folders `--poll` is for takes a while. The port is
     // bound by now, so a browser arriving meanwhile waits rather than being
     // refused.
+    if args.poll {
+        banner::print(bound, &args, &static_dir, no_app_page, from_ignore_file);
+    }
+
     if let Some(ignored) = ignored {
         watch::start(&static_dir, args.poll, ignored, reloader)?;
+    }
+
+    // Otherwise the watch goes on first, so that a watch which fails does not
+    // follow a banner saying live reload is on.
+    if !args.poll {
+        banner::print(bound, &args, &static_dir, no_app_page, from_ignore_file);
     }
 
     if args.open {

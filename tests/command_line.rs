@@ -442,6 +442,39 @@ fn a_browser_that_stops_at_once_with_an_error_is_reported() {
 
 #[cfg(unix)]
 #[test]
+fn a_browser_that_stops_at_once_lets_the_next_one_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // `false` starts and stops with an error; the next on the list should
+    // open instead.
+    let dir = TempDir::new("browser-list");
+    dir.write("index.html", "<html>hi</html>");
+    let outside = TempDir::new("browser-list-open");
+    let browser = outside.join("browser.sh");
+    let opened = outside.join("opened");
+    outside.write(
+        "browser.sh",
+        &format!("#!/bin/sh\necho \"$@\" > '{}'\n", opened.display()),
+    );
+    std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755))
+        .expect("could not make the browser runnable");
+
+    let named = format!("false:{}", browser.display());
+    let server = Server::start_in(dir.path(), &["--open"], &[("BROWSER", &named)]);
+
+    assert_eq!(
+        wait_for_a_line(&opened, &server),
+        format!("http://localhost:{}", server.port)
+    );
+    assert!(
+        !server.said("Cannot open a browser"),
+        "one browser opened, so nothing should be said:\n{}",
+        server.lines().join("\n")
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_browser_that_will_not_open_does_not_stop_the_server() {
     let dir = TempDir::new("no-browser");
     dir.write("index.html", "<html>hi</html>");

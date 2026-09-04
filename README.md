@@ -84,12 +84,16 @@ names. That variable may be a whole command, with `%s` where the address goes:
 BROWSER="firefox --new-window %s" servio --open
 ```
 
-It may also name several, tried in turn until one starts, parted by `:` (`;` on
-Windows). Quote a path that has a space in it:
+It may also name several, tried in turn until one opens the address, parted by
+`:` (`;` on Windows); one that stops at once with an error is passed over for
+the next. Quote anything with a space in it, a path or a flag's value:
 
 ```bash
 BROWSER="firefox:'/Applications/Firefox.app/Contents/MacOS/firefox' %s" servio --open
 ```
+
+A quote counts anywhere in a word, as it does in a shell, so a path with an
+apostrophe in it has to be quoted whole.
 
 If no browser can be opened, or the one named stops at once with an error,
 servio says so and keeps serving. With `--poll`, the browser opens once the
@@ -117,6 +121,10 @@ stops at a `/`; `**` crosses any number of directories, and `tmp/**` covers
 `Build.LOG` from `build.log`, neither does a pattern. The files are still
 served, and `--poll` still reads them: the pattern only decides what refreshes
 the browser.
+
+Naming files does not name the folder holding them. With `*.log`, a build that
+creates `out/` afresh each run refreshes the browser once, for the new folder;
+`out/**` covers the folder as well.
 
 Patterns used on every run belong in a file called `.servioignore` in the
 served directory, one to a line, with `#` starting a comment:

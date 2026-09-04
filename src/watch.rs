@@ -186,6 +186,12 @@ fn keep_watching<W: notify::Watcher + Send + 'static>(
         .watch(root, RecursiveMode::Recursive)
         .map_err(|error| cannot_watch_here(root, &error))?;
 
+    // Looked at again afterwards, as `watch_again` does: a poll reports a
+    // watch on a directory it could not read as success, and then hears
+    // nothing ever after. When the two looks disagree, nothing is known to be
+    // watched, and the check puts that right.
+    let first_look = first_look.filter(|it| Some(it.id) == directory_id(root));
+
     let root = root.to_path_buf();
     std::thread::spawn(move || {
         supervise(debouncer, root, failures, first_look, announced, reloader)
