@@ -176,7 +176,10 @@ impl Server {
 
     /// Every announcement that makes a connected browser refresh.
     pub fn reloads(&self) -> usize {
-        self.count("File changed") + self.count("Directory replaced") + self.count("Watching again")
+        self.count("File changed")
+            + self.count("Directory replaced")
+            + self.count("Directory back")
+            + self.count("Watching again")
     }
 
     pub fn wait_for_reloads(&self, wanted: usize) {

@@ -139,7 +139,8 @@ The file is read once, when the server starts. Being hidden, it is never
 served, and editing it does not refresh the browser. Its patterns and those
 from `--ignore` apply together, and the banner says how many it added.
 
-Live reload continues working when a build replaces the served directory. On
+Live reload continues working when a build replaces the served directory, or
+moves it aside and back. On
 macOS, changing file permissions may also trigger one refresh because of how
 the operating system reports file events.
 
@@ -161,6 +162,12 @@ within one second of each other would otherwise look like one. So
 costs far more while it waits. Use it only where the ordinary watcher stays
 silent, and point it at the build output rather than the whole project tree, or
 every look will read `node_modules` as well.
+
+On Windows there is one more reason to poll. A build that changes thousands of
+files in the same instant can overflow the room the system keeps for reporting
+them. The system's watcher then stops without a word, and nothing refreshes
+until servio is started again. Where builds are that large, `--poll` cannot
+lose the watch.
 
 Links are not followed. The server refuses to hand out anything outside the
 served directory, so a link leading out cannot change what the browser sees,

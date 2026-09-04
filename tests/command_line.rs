@@ -17,8 +17,14 @@ const STARTS_WITHIN: Duration = Duration::from_secs(5);
 /// cannot be read stops the watcher on Linux and does not on macOS — so it is
 /// stopped here and reported as running, and the test decides what that means.
 fn run(args: &[&str]) -> (String, bool) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_servio"))
-        .args(args)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_servio"));
+    command.args(args);
+    run_command(command)
+}
+
+/// The same, for a command line of one's own.
+fn run_command(mut command: Command) -> (String, bool) {
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -567,6 +573,76 @@ fn a_port_the_system_will_not_give_us_says_so_plainly() {
     assert!(
         !said.contains("os error"),
         "no numbered errors, please: {said}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn running_out_of_open_files_is_said_in_plain_words() {
+    // A dozen are not enough to watch with. Each editor and dev server holds
+    // a watcher too, so the limit is reached in ordinary use. Which step runs
+    // out first, the port or the watcher, depends on how many files were open
+    // to begin with, so several limits are tried and each has to be explained.
+    let dir = TempDir::new("few-files");
+    dir.write("index.html", "<html>hi</html>");
+    let mut explained = 0;
+
+    for limit in 9..=12 {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                r#"ulimit -n {limit} && exec "$0" --dir "$1" --port 0"#
+            ))
+            .arg(env!("CARGO_BIN_EXE_servio"))
+            .arg(dir.path());
+
+        let (said, still_running) = run_command(command);
+
+        // Enough after all, or too few even to start the runtime: nothing to
+        // check either way.
+        if still_running || said.contains("Runtime") {
+            continue;
+        }
+
+        assert!(
+            !said.contains("os error"),
+            "no numbered errors, please: {said}"
+        );
+        assert!(said.contains("no open files left"), "{said}");
+        explained += 1;
+    }
+
+    assert!(explained > 0, "no limit between 9 and 12 ran out");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_below_that_it_may_not_read_is_named_along_with_a_way_round() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // The served directory is fine; one below it is closed. That is the one
+    // to name, and there are two ways to serve regardless.
+    let dir = TempDir::new("closed-below");
+    dir.write("index.html", "<html>hi</html>");
+    let locked = dir.join("locked");
+    std::fs::create_dir_all(&locked).expect("could not create the directory");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("could not close the directory");
+
+    let (said, still_running) = run(&["--dir", dir.path().to_str().unwrap()]);
+    let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+
+    // macOS watches a directory it cannot read, and root reads it outright.
+    if still_running {
+        return;
+    }
+
+    assert!(said.contains("locked for changes"), "{said}");
+    assert!(said.contains("will not let this program read it"), "{said}");
+    assert!(
+        said.contains("--poll") && said.contains("--no-reload"),
+        "no way round was offered: {said}"
     );
 }
 

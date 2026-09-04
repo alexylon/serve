@@ -3,6 +3,37 @@
 ## [Unreleased]
 
 ### Fixed
+- A build that writes for longer than a moment refreshed the browser once for
+  every few hundredths of a second it went on. The browser is now refreshed
+  once the files have been quiet for a moment, one refresh for one build. A
+  file written without pause, a log say, puts a refresh off by a second at
+  most
+- With `--poll`, a directory replaced and taken away again within one look
+  was announced as replaced while there was nothing there, and its return
+  passed for nothing new
+- Running out of file watches while a build creates directories tore the
+  watch down and set it up again, which ran out partway and left directories
+  watched before unwatched. The watch that is on now stays, and one line
+  names the directory that could not be watched
+- A change made while a script had moved the served directory aside was
+  never refreshed once the directory was back. The check now says "Directory
+  back" and refreshes
+- Running out of open files, which on Linux the file watchers of every editor
+  and dev server count against, was reported as a numbered error instead of
+  being explained, whether the port or the watcher was what ran out
+- On macOS and Windows, every time the watch went on the whole served
+  directory was walked, following links out of it, for a record that was never
+  needed. It no longer is
+- When the system dropped file events, as it can under a build that writes
+  more files than it can report, the notice saying so was ignored and the
+  browser was not refreshed for what was missed. It now refreshes
+- A rebuild that brought a directory this program may not read left the watch
+  off without a word, while the banner still said live reload was on. It now
+  says which directory and why, tries again every second, and announces the
+  rebuild once the watch can go on
+- Refusing to start over a directory it may not read now names that directory
+  rather than the served one, and says that `--poll` watches what it may and
+  `--no-reload` serves without watching
 - On macOS, a run announced a change and refreshed the browser once shortly
   after starting, for files that were written just before it began watching.
   For the first moments of a run, a file that has not been written since is no

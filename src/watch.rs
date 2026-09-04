@@ -6,11 +6,10 @@ use file_id::FileId;
 use notify_debouncer_full::notify::ErrorKind as WatchError;
 use notify_debouncer_full::notify::event::{AccessKind, AccessMode, MetadataKind};
 use notify_debouncer_full::notify::{
-    self, EventKind, PollWatcher, RecursiveMode, event::ModifyKind,
+    self, EventKind, PollWatcher, RecommendedWatcher, RecursiveMode, event::ModifyKind,
 };
 use notify_debouncer_full::{
-    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
-    new_debouncer_opt,
+    DebounceEventResult, DebouncedEvent, Debouncer, NoCache, new_debouncer_opt,
 };
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -23,6 +22,17 @@ use tower_livereload::Reloader;
 /// refresh still feels immediate.
 const DEBOUNCE_DELAY: Duration = Duration::from_millis(200);
 
+/// How long the files have to stay quiet before the browser is refreshed. The
+/// watcher hands over what it has every few hundredths of a second, and a
+/// build writes for longer than that; refreshed at each handover, the browser
+/// would reload a dozen times for one build.
+const QUIET_FOR: Duration = Duration::from_millis(150);
+
+/// How long files that never go quiet can put a refresh off: a log written
+/// every moment, a build that runs for minutes. Past this the browser is
+/// refreshed anyway, and again as the writing goes on.
+const PUT_OFF_AT_MOST: Duration = Duration::from_secs(1);
+
 /// How often `--poll` looks at the files. A change waits up to this long to be
 /// noticed, and every look reads every file, on the very folders where reading
 /// is slow.
@@ -32,11 +42,15 @@ pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// watched, and how long to wait between attempts to watch it again.
 const CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long to wait before trying to watch again after the system refused.
+/// Every try walks the whole directory, so not too often.
+const TRIES_AGAIN_AFTER: Duration = Duration::from_secs(1);
+
 /// How many unreadable paths are worth naming. Past that it goes quiet.
 const MOST_PROBLEMS: usize = 20;
 
 /// The watcher, with the debouncing that groups the writes of one save.
-type Debounced<W> = Debouncer<W, RecommendedCache>;
+type Debounced<W> = Debouncer<W, NoCache>;
 
 /// Why the watcher has to be set up again. Both mean changes were missed;
 /// they differ only in what to call it.
@@ -57,6 +71,8 @@ enum Rewatch {
 /// directory handed to a container.
 pub(crate) fn start(root: &Path, poll: bool, ignored: Ignored, reloader: Reloader) -> Result<()> {
     let (failed, failures) = mpsc::channel();
+    let (changed, changes) = mpsc::channel();
+    std::thread::spawn(move || refresh_once_quiet(changes, reloader));
 
     let rebuilds = Rebuilds::new(poll);
     let report = report_changes(
@@ -64,16 +80,19 @@ pub(crate) fn start(root: &Path, poll: bool, ignored: Ignored, reloader: Reloade
         poll,
         ignored,
         rebuilds.clone(),
-        reloader.clone(),
+        changed.clone(),
         failed,
     );
 
+    // No record of file numbers: it only tells a rename from a removal and a
+    // creation, which refresh the browser either way, and filling it walks the
+    // whole directory, links included, every time the watch goes on.
     if poll {
         let debouncer = new_debouncer_opt::<_, PollWatcher, _>(
             DEBOUNCE_DELAY,
             None,
             report,
-            RecommendedCache::new(),
+            NoCache::new(),
             // The contents, not just the write time: a poll keeps that only to
             // the whole second, so two saves within one second of each other
             // would look like one and the second would never reach the browser.
@@ -91,12 +110,38 @@ pub(crate) fn start(root: &Path, poll: bool, ignored: Ignored, reloader: Reloade
         )
         .map_err(|error| cannot_watch_here(root, &error))?;
 
-        keep_watching(debouncer, root, failures, rebuilds, reloader)
+        keep_watching(debouncer, root, failures, rebuilds, changed)
     } else {
-        let debouncer = new_debouncer(DEBOUNCE_DELAY, None, report)
-            .map_err(|error| cannot_watch_here(root, &error))?;
+        let debouncer = new_debouncer_opt::<_, RecommendedWatcher, _>(
+            DEBOUNCE_DELAY,
+            None,
+            report,
+            NoCache::new(),
+            notify::Config::default(),
+        )
+        .map_err(|error| cannot_watch_here(root, &error))?;
 
-        keep_watching(debouncer, root, failures, rebuilds, reloader)
+        keep_watching(debouncer, root, failures, rebuilds, changed)
+    }
+}
+
+/// Refreshes the browser once the files have been quiet for a moment, however
+/// often the watcher spoke up meanwhile, and says so where any of that was
+/// worth a line.
+fn refresh_once_quiet(changes: mpsc::Receiver<bool>, reloader: Reloader) {
+    while let Ok(mut worth_a_line) = changes.recv() {
+        let waiting_since = Instant::now();
+        while let Ok(another) = changes.recv_timeout(QUIET_FOR) {
+            worth_a_line |= another;
+            if waiting_since.elapsed() >= PUT_OFF_AT_MOST {
+                break;
+            }
+        }
+
+        if worth_a_line {
+            println!("  File changed, reloading...");
+        }
+        reloader.reload();
     }
 }
 
@@ -104,10 +149,10 @@ pub(crate) fn start(root: &Path, poll: bool, ignored: Ignored, reloader: Reloade
 /// watcher and the check.
 #[derive(Clone)]
 struct Rebuilds {
-    /// When a rebuild was last announced. The check notices a new directory
-    /// within one look, while the watcher's account of the same rebuild takes
-    /// until it next hears anything, so the announcement comes first and the
-    /// watcher can recognise the echo of it.
+    /// When a rebuild was last announced. The watcher's own account of the
+    /// same rebuild arrives a moment later, and this is how it is recognised
+    /// as the echo it is. Where the watcher gets there first instead, what it
+    /// says is dropped by comparing `watching` with the directory at the name.
     announced: Arc<Mutex<Option<Instant>>>,
     /// Which directory the watch is on, by the system's number for it. The
     /// watch follows the directory and not the name, so the watcher compares
@@ -139,7 +184,7 @@ fn report_changes(
     polling: bool,
     ignored: Ignored,
     rebuilds: Rebuilds,
-    changed: Reloader,
+    changed: mpsc::Sender<bool>,
     failed: mpsc::Sender<()>,
 ) -> impl FnMut(DebounceEventResult) + Send + 'static {
     // What has already been said about an unreadable path, so that a look does
@@ -169,12 +214,10 @@ fn report_changes(
                 is_change(&ignored, &root, event, polling)
                     && !(settling_in && from_before_the_watch(event, watch_went_on))
             }) {
-                // These events are the rebuild just announced, and one rebuild
-                // deserves one line. The page is refreshed either way.
-                if !just_announced(&rebuilds.announced, rebuilds.same_rebuild) {
-                    println!("  File changed, reloading...");
-                }
-                changed.reload();
+                // Whether this is worth a line is decided now, while a
+                // rebuild just announced is still fresh. The refresh itself
+                // waits for the files to go quiet.
+                let _ = changed.send(!just_announced(&rebuilds.announced, rebuilds.same_rebuild));
             }
         }
         // One path a look could not read, not a watch that went down: the rest
@@ -195,12 +238,33 @@ fn report_changes(
             }
         }
         Err(errors) => {
+            let (out_of_watches, down): (Vec<_>, Vec<_>) = errors
+                .iter()
+                .partition(|error| matches!(error.kind, WatchError::MaxFilesWatch));
+
+            // A directory created just now could not be watched, and the rest
+            // still is. Setting the watch up again would run out partway
+            // through and leave less watched than now.
+            for error in out_of_watches {
+                let problem = format!(
+                    "Cannot watch {}: {}. New directories are not watched from here on",
+                    short_name(&root, error.paths.first().map_or(&root, PathBuf::as_path)),
+                    cannot_watch(error)
+                );
+                if !told.contains(&problem) && told.len() < MOST_PROBLEMS {
+                    eprintln!("  {problem}");
+                    told.push(problem);
+                }
+            }
+
             // Otherwise the watcher dies quietly while the banner still says
             // reloads are on.
-            for error in errors {
-                eprintln!("  Cannot watch for changes: {}", cannot_watch(&error));
+            if !down.is_empty() {
+                for error in down {
+                    eprintln!("  Cannot watch for changes: {}", cannot_watch(error));
+                }
+                let _ = failed.send(());
             }
-            let _ = failed.send(());
         }
     }
 }
@@ -211,7 +275,7 @@ fn keep_watching<W: notify::Watcher + Send + 'static>(
     root: &Path,
     failures: Receiver<()>,
     rebuilds: Rebuilds,
-    reloader: Reloader,
+    changed: mpsc::Sender<bool>,
 ) -> Result<()> {
     // Look first, then watch. The other way round, a directory replaced in
     // between would leave the watch on the old one and the number remembered
@@ -229,9 +293,7 @@ fn keep_watching<W: notify::Watcher + Send + 'static>(
     remember(&rebuilds.watching, &first_look);
 
     let root = root.to_path_buf();
-    std::thread::spawn(move || {
-        supervise(debouncer, root, failures, first_look, rebuilds, reloader)
-    });
+    std::thread::spawn(move || supervise(debouncer, root, failures, first_look, rebuilds, changed));
 
     Ok(())
 }
@@ -246,8 +308,11 @@ fn supervise<W: notify::Watcher>(
     failures: Receiver<()>,
     mut watched: Option<Watched>,
     rebuilds: Rebuilds,
-    reloader: Reloader,
+    changed: mpsc::Sender<bool>,
 ) {
+    // Whether the last look found no directory at the name.
+    let mut was_missing = false;
+
     loop {
         let reason = match failures.recv_timeout(CHECK_INTERVAL) {
             Ok(()) => Rewatch::WatchFailed,
@@ -256,11 +321,23 @@ fn supervise<W: notify::Watcher>(
                 // Missing for the moment means a build is between removing
                 // the directory and writing the new one.
                 let Some(now) = directory_id(&root) else {
+                    was_missing = true;
                     continue;
                 };
 
                 match watched.as_ref().map(|it| it.id) {
                     Some(before) if before != now => Rewatch::Replaced,
+                    // Away for a moment and back as it was: a script that
+                    // moves the directory aside to work on it. Whatever was
+                    // written meanwhile was reported under a name that led
+                    // nowhere, and left to this check.
+                    Some(_) if was_missing => {
+                        was_missing = false;
+                        announce(&rebuilds.announced);
+                        println!("  Directory back, reloading...");
+                        let _ = changed.send(false);
+                        continue;
+                    }
                     Some(_) => continue,
                     // Nothing to compare against: the directory could not
                     // be reached when the watch went on, so the watch may be
@@ -286,6 +363,7 @@ fn supervise<W: notify::Watcher>(
 
         watched = watch_again(&mut debouncer, &root, &failures, rebuild);
         remember(&rebuilds.watching, &watched);
+        was_missing = false;
 
         // Either way the page may be out of date: whatever was written while
         // there was no watch went unnoticed, and nothing else will announce
@@ -297,7 +375,7 @@ fn supervise<W: notify::Watcher>(
             }
             Rewatch::WatchFailed => println!("  Watching again, reloading..."),
         }
-        reloader.reload();
+        let _ = changed.send(false);
     }
 }
 
@@ -314,6 +392,9 @@ fn watch_again<W: notify::Watcher>(
     failures: &Receiver<()>,
     rebuild: Option<&Mutex<Option<Instant>>>,
 ) -> Option<Watched> {
+    // What has been said about a watch the system refused, so it is said once.
+    let mut told = None;
+
     loop {
         if !root.is_dir() {
             std::thread::sleep(CHECK_INTERVAL);
@@ -335,18 +416,48 @@ fn watch_again<W: notify::Watcher>(
         // Looked at before watching again, for the same reason as at the
         // start.
         let looked_at = Watched::at(root);
-        let watched = debouncer.watch(root, RecursiveMode::Recursive).is_ok();
+        let watched = debouncer.watch(root, RecursiveMode::Recursive);
 
-        // Looked at again afterwards. A poll reports a directory it cannot
-        // read as an event, not an error, so a watch put on one that went
-        // meanwhile comes back as success and finds nothing ever after. Both
-        // looks agreeing means the watch went on a directory still there.
-        if watched && looked_at.as_ref().map(|it| it.id) == directory_id(root) {
-            return looked_at;
+        match watched {
+            Ok(()) if same_directory(looked_at.as_ref(), directory_id(root)) => {
+                return looked_at;
+            }
+            // Gone or replaced meanwhile: the next time round starts afresh.
+            Ok(()) => {}
+            // Windows wraps every failure the same way, so the directory is
+            // asked as well.
+            Err(error) if was_not_there(&error) || !root.is_dir() => {}
+            // Most often a directory below that this program may not read.
+            // Said once, since the watch is off until the system allows it
+            // and the banner still says live reload is on.
+            Err(error) => {
+                let problem = format!(
+                    "Cannot watch {}: {}. Nothing will refresh until the watch can go on",
+                    short_name(root, error.paths.first().map_or(root, PathBuf::as_path)),
+                    cannot_watch(&error)
+                );
+                if told.as_ref() != Some(&problem) {
+                    eprintln!("  {problem}");
+                    told = Some(problem);
+                }
+                std::thread::sleep(TRIES_AGAIN_AFTER);
+                continue;
+            }
         }
 
         std::thread::sleep(CHECK_INTERVAL);
     }
+}
+
+/// True when the directory looked at before the watch went on is still the
+/// one there after it. A poll takes a watch on a name that leads nowhere
+/// without complaint, and finds nothing ever after.
+///
+/// Nothing does not agree with nothing: a directory gone between the two looks
+/// would otherwise be announced as replaced while there is nothing there, and
+/// its return would pass for nothing new.
+fn same_directory(before: Option<&Watched>, after: Option<FileId>) -> bool {
+    before.is_some_and(|it| Some(it.id) == after)
 }
 
 /// True when everything the event names is still there with a write time from
@@ -360,11 +471,15 @@ fn watch_again<W: notify::Watcher>(
 /// copy that keeps the times of the files it copies writes new contents with
 /// old times.
 fn from_before_the_watch(event: &DebouncedEvent, watch_went_on: SystemTime) -> bool {
-    event.paths.iter().all(|path| {
-        std::fs::metadata(path)
-            .and_then(|about| about.modified())
-            .is_ok_and(|written| written <= watch_went_on)
-    })
+    // Dropped events name nothing to ask, or on macOS the directory they were
+    // under, which says nothing about what was dropped.
+    !event.need_rescan()
+        && !event.paths.is_empty()
+        && event.paths.iter().all(|path| {
+            std::fs::metadata(path)
+                .and_then(|about| about.modified())
+                .is_ok_and(|written| written <= watch_went_on)
+        })
 }
 
 /// True when the browser should refresh.
@@ -373,6 +488,12 @@ fn from_before_the_watch(event: &DebouncedEvent, watch_went_on: SystemTime) -> b
 /// count as a change, the browser would reload, and that reload would read
 /// the file again — forever.
 fn is_change(ignored: &Ignored, root: &Path, event: &DebouncedEvent, polling: bool) -> bool {
+    // The system dropped events on the way, so anything may have changed.
+    // Nothing is named, so this comes before the rules about paths.
+    if event.need_rescan() {
+        return true;
+    }
+
     let written = match event.kind {
         EventKind::Create(_) | EventKind::Remove(_) | EventKind::Any => true,
         // How a poll says a file was written, where the write time moved; where
@@ -534,21 +655,21 @@ fn cannot_look(
         return None;
     }
 
-    // Named the short way, since the banner has already said where the served
-    // directory is. That directory itself keeps its whole path, having nothing
-    // left to name it by.
-    let below = path.strip_prefix(root).unwrap_or(path);
-    let named = if below.as_os_str().is_empty() {
-        path
-    } else {
-        below
-    };
-
     Some(format!(
         "Cannot look at {}: {}",
-        named.display(),
+        short_name(root, path),
         cannot_watch(error)
     ))
+}
+
+/// A path named the short way, below the served directory the banner has
+/// already named in full. That directory itself keeps its whole path, having
+/// nothing left to name it by.
+fn short_name(root: &Path, path: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(below) if !below.as_os_str().is_empty() => below.display().to_string(),
+        _ => path.display().to_string(),
+    }
 }
 
 /// True when the look found nothing at that name.
@@ -574,10 +695,22 @@ fn cannot_watch(error: &notify_debouncer_full::notify::Error) -> String {
     }
 }
 
-/// The same, naming the directory it is about.
+/// The same, naming the directory the trouble is with, which may lie below
+/// the served one. Where that one cannot be read there are two ways round,
+/// and both are worth a mention.
 fn cannot_watch_here(root: &Path, error: &notify_debouncer_full::notify::Error) -> anyhow::Error {
-    anyhow::Error::msg(cannot_watch(error))
-        .context(format!("cannot watch {} for changes", root.display()))
+    let named = error.paths.first().map_or(root, PathBuf::as_path);
+    let mut why = cannot_watch(error);
+    if named != root && may_not_read(error) {
+        why.push_str(" — --poll watches what it may, and --no-reload serves without watching");
+    }
+
+    anyhow::Error::msg(why).context(format!("cannot watch {} for changes", named.display()))
+}
+
+/// True when the system refused to let this program read the path.
+fn may_not_read(error: &notify_debouncer_full::notify::Error) -> bool {
+    matches!(&error.kind, WatchError::Io(io) if io.kind() == ErrorKind::PermissionDenied)
 }
 
 #[cfg(test)]
@@ -679,6 +812,28 @@ mod tests {
             &touched,
             false
         ));
+    }
+
+    #[test]
+    fn dropped_events_are_a_change_whatever_was_ignored_and_however_new_the_watch() {
+        // A build writing more files than the system can report: it says so
+        // once, naming nothing, and everything may have changed.
+        use notify_debouncer_full::notify::event::Flag;
+        let dropped = DebouncedEvent::new(
+            Event::new(EventKind::Other).set_flag(Flag::Rescan),
+            Instant::now(),
+        );
+
+        assert!(is_change(
+            &nothing_chosen(),
+            Path::new(ROOT),
+            &dropped,
+            false
+        ));
+        assert!(
+            !from_before_the_watch(&dropped, SystemTime::now()),
+            "a report naming no file was taken for one about old files"
+        );
     }
 
     #[test]
@@ -798,6 +953,26 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
+    fn a_watch_put_on_nothing_is_not_on_a_directory() {
+        // Between the two looks the directory went: a poll takes the watch
+        // all the same, and nothing agreeing with nothing let that pass.
+        let path = std::env::temp_dir().join(format!("servio-nothing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        let before = Watched::at(&path).expect("could not look at the directory");
+
+        assert!(same_directory(Some(&before), directory_id(&path)));
+        assert!(
+            !same_directory(None, None),
+            "nothing was taken for a directory"
+        );
+        assert!(!same_directory(Some(&before), None));
+
+        std::fs::remove_dir_all(&path).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
     fn what_the_watcher_reports_is_left_to_the_check_once_the_directory_is_replaced() {
         let path = std::env::temp_dir().join(format!("servio-replaced-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
@@ -828,6 +1003,63 @@ mod tests {
         assert!(!replaced_under_the_watch(&Mutex::new(None), &path));
 
         std::fs::remove_dir_all(&path).unwrap();
+    }
+
+    #[test]
+    fn a_watcher_that_went_down_is_set_up_again_but_a_look_that_could_not_read_is_not() {
+        let (changed, _changes) = mpsc::channel();
+        let trouble = || Err(vec![notify::Error::generic("the watcher went down")]);
+
+        let (failed, failures) = mpsc::channel();
+        let mut report = report_changes(
+            PathBuf::from(ROOT),
+            false,
+            nothing_chosen(),
+            Rebuilds::new(false),
+            changed.clone(),
+            failed,
+        );
+        report(trouble());
+        assert!(
+            failures.try_recv().is_ok(),
+            "a watcher that went down was left down"
+        );
+
+        // Out of watches for a directory created just now: what is watched
+        // still is, and a new watch would run out partway through.
+        let (failed, failures) = mpsc::channel();
+        let mut report = report_changes(
+            PathBuf::from(ROOT),
+            false,
+            nothing_chosen(),
+            Rebuilds::new(false),
+            changed.clone(),
+            failed,
+        );
+        report(Err(vec![
+            notify::Error::new(WatchError::MaxFilesWatch).add_path(PathBuf::from("/site/new")),
+        ]));
+        assert!(
+            failures.try_recv().is_err(),
+            "running out of watches tore down the watch that was on"
+        );
+
+        // A look reads the whole tree every time, so one path it could not
+        // read is worth a word and not a new watch.
+        let (failed, failures) = mpsc::channel();
+        let mut report = report_changes(
+            PathBuf::from(ROOT),
+            true,
+            nothing_chosen(),
+            Rebuilds::new(true),
+            changed,
+            failed,
+        );
+        report(trouble());
+        assert!(
+            failures.try_recv().is_err(),
+            "one path a look could not read was taken for a watch that went down"
+        );
     }
 
     #[test]

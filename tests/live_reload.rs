@@ -2,8 +2,8 @@
 
 mod common;
 
-use common::{Server, TempDir, get, watches_for_reload};
-use std::time::Duration;
+use common::{Server, TIMEOUT, TempDir, get, watches_for_reload};
+use std::time::{Duration, Instant};
 
 /// Long enough for a poll to have had a look, and for the debounce to have
 /// grouped what it found.
@@ -35,6 +35,54 @@ fn saving_a_file_refreshes_the_browser() {
     let before = server.reloads();
     dir.write("app.css", "body { color: red }");
     server.wait_for_reloads(before + 1);
+}
+
+#[test]
+fn a_burst_of_writes_refreshes_once() {
+    // One save can write several files, and a build writes many at once.
+    let dir = site("burst");
+    let server = Server::start(dir.path(), &[]);
+    server.settle();
+
+    let before = server.reloads();
+    for part in 0..5 {
+        dir.write(&format!("part-{part}.css"), "body {}");
+    }
+    server.wait_for_reloads(before + 1);
+    server.settle();
+
+    assert_eq!(
+        server.reloads(),
+        before + 1,
+        "a burst of writes refreshed more than once:\n{}",
+        server.lines().join("\n")
+    );
+}
+
+#[test]
+fn a_build_that_writes_for_a_while_does_not_refresh_at_every_handover() {
+    // The watcher hands over what it has every few hundredths of a second,
+    // and a build writing for longer than that used to refresh the browser at
+    // each handover.
+    let dir = site("slow-build");
+    let server = Server::start(dir.path(), &[]);
+    server.settle();
+
+    let before = server.reloads();
+    for part in 0..12 {
+        dir.write(&format!("part-{part}.css"), "body {}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    server.wait_for_reloads(before + 1);
+    server.settle();
+
+    // One, or two where the machine stalled partway through the build. What
+    // it must not be is one per handover, a dozen here.
+    assert!(
+        server.reloads() <= before + 2,
+        "a build refreshed at every handover:\n{}",
+        server.lines().join("\n")
+    );
 }
 
 #[test]
@@ -544,6 +592,37 @@ fn a_rebuild_is_announced_once() {
 }
 
 #[test]
+fn a_change_made_while_the_directory_is_moved_aside_is_refreshed_once_it_is_back() {
+    moved_aside_and_back(&[]);
+}
+
+#[test]
+fn a_change_made_while_the_directory_is_moved_aside_is_refreshed_once_it_is_back_while_polling() {
+    moved_aside_and_back(&["--poll"]);
+}
+
+/// A script moves the directory aside, works on it there, and moves it back.
+/// The change was reported under a name that led nowhere at the time.
+fn moved_aside_and_back(args: &[&str]) {
+    let dir = site("aside");
+    let elsewhere = TempDir::new("aside-elsewhere");
+    let aside = elsewhere.join("site");
+    let server = Server::start(dir.path(), args);
+    server.settle();
+
+    let before = server.reloads();
+    std::fs::rename(dir.path(), &aside).expect("could not move the directory aside");
+    std::fs::write(aside.join("index.html"), "<html>worked on</html>")
+        .expect("could not write the test file");
+    std::thread::sleep(Duration::from_millis(400));
+    std::fs::rename(&aside, dir.path()).expect("could not move the directory back");
+
+    server.wait_for("Directory back");
+    server.wait_for_reloads(before + 1);
+    assert!(get(server.port, "/").text().contains("worked on"));
+}
+
+#[test]
 fn keeps_serving_after_the_directory_is_replaced() {
     let dir = site("still-serving");
     let server = Server::start(dir.path(), &[]);
@@ -555,6 +634,89 @@ fn keeps_serving_after_the_directory_is_replaced() {
     server.wait_for("Directory replaced");
 
     assert!(get(server.port, "/").text().contains("rebuilt"));
+}
+
+#[test]
+fn a_file_that_is_written_without_pause_does_not_hold_the_refresh_back_for_long() {
+    // A log written every moment never goes quiet. Waiting for that, an edit
+    // made meanwhile would never reach the browser.
+    let dir = site("never-quiet");
+    let server = Server::start(dir.path(), &[]);
+    server.settle();
+
+    let before = server.reloads();
+    let writing_since = Instant::now();
+    while writing_since.elapsed() < Duration::from_millis(2500) {
+        dir.write("log.txt", &format!("{:?}", writing_since.elapsed()));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    server.settle();
+
+    assert!(
+        server.reloads() >= before + 2,
+        "a file written without pause held the refresh back:\n{}",
+        server.lines().join("\n")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_rebuild_with_a_directory_it_may_not_read_says_so_rather_than_going_quiet() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = site("locked-rebuild");
+    let server = Server::start(dir.path(), &[]);
+    server.settle();
+
+    // Built elsewhere and moved into place whole, so the check cannot catch
+    // the new directory before the locked one is in it.
+    let next = TempDir::new("locked-rebuild-next");
+    next.write("index.html", "<html>rebuilt</html>");
+    let locked = next.join("locked");
+    std::fs::create_dir(&locked).expect("could not create the directory");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("could not close the directory");
+    dir.remove_all();
+    std::fs::rename(next.path(), dir.path()).expect("could not move the directory into place");
+    let locked = dir.join("locked");
+
+    let deadline = Instant::now() + TIMEOUT;
+    while !server.said("Cannot watch locked") && !server.said("Directory replaced") {
+        assert!(
+            Instant::now() < deadline,
+            "nothing was said:\n{}",
+            server.lines().join("\n")
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Running as root: the directory can be read after all.
+    if server.said("Directory replaced") {
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+        return;
+    }
+    assert!(
+        server.said("will not let this program read it"),
+        "the reason was not given:\n{}",
+        server.lines().join("\n")
+    );
+
+    // Tried again every second, and said once.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(
+        server.count("Cannot watch"),
+        1,
+        "{}",
+        server.lines().join("\n")
+    );
+    assert!(!server.said("Directory replaced"));
+
+    // Let in, the watch goes on and the rebuild is announced; edits count again.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("could not open the directory");
+    server.wait_for("Directory replaced");
+    server.settle();
+    dir.write("index.html", "<html>edited</html>");
+    server.wait_for("File changed");
 }
 
 #[cfg(target_os = "linux")]

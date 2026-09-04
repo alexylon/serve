@@ -28,6 +28,11 @@ pub(crate) fn why(error: &std::io::Error) -> String {
         ErrorKind::NotADirectory => "part of that path is a file, not a directory".to_string(),
         // A file was expected and a directory found, the other way round.
         ErrorKind::IsADirectory => "it is a directory, not a file".to_string(),
+        // Out of open files, by the numbers the system uses. On Linux the file
+        // watchers count against the same limit.
+        _ if cfg!(unix) && matches!(error.raw_os_error(), Some(23 | 24)) => {
+            "the system has no open files left for this program — close some programs, or raise the limit".to_string()
+        }
         _ => error.to_string(),
     }
 }
