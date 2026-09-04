@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-04
+
 ### Fixed
 - A build that writes for longer than a moment refreshed the browser once for
   every few hundredths of a second it went on. The browser is now refreshed
