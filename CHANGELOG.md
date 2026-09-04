@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- On macOS, a run announced a change and refreshed the browser once shortly
+  after starting, for files that were written just before it began watching.
+  For the first moments of a run, a file that has not been written since is no
+  longer called a change
+
 ## [0.6.1] - 2026-09-04
 
 ### Fixed

@@ -16,7 +16,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tower_livereload::Reloader;
 
 /// Long enough to group the writes one save makes, short enough that the
@@ -128,6 +128,11 @@ impl Rebuilds {
     }
 }
 
+/// How long after the watch goes on the files themselves are asked whether
+/// anything happened. Long enough for a system that takes its time to have
+/// caught up.
+const SETTLING_IN: Duration = Duration::from_secs(3);
+
 /// What the watcher calls when files changed, and when it could not read them.
 fn report_changes(
     root: PathBuf,
@@ -141,6 +146,11 @@ fn report_changes(
     // not say it again.
     let mut told: Vec<String> = Vec::new();
 
+    // When the watch goes on, by both clocks: one to compare write times
+    // against, one to measure the first moments by.
+    let watch_went_on = SystemTime::now();
+    let watching_since = Instant::now();
+
     move |result| match result {
         Ok(events) => {
             // A rebuild is the check's to report, once, when the new
@@ -151,10 +161,14 @@ fn report_changes(
                 return;
             }
 
-            if events
-                .iter()
-                .any(|event| is_change(&ignored, &root, event, polling))
-            {
+            // A poll has its own account of what the files were, so it never
+            // reports one that was there all along.
+            let settling_in = !polling && watching_since.elapsed() < SETTLING_IN;
+
+            if events.iter().any(|event| {
+                is_change(&ignored, &root, event, polling)
+                    && !(settling_in && from_before_the_watch(event, watch_went_on))
+            }) {
                 // These events are the rebuild just announced, and one rebuild
                 // deserves one line. The page is refreshed either way.
                 if !just_announced(&rebuilds.announced, rebuilds.same_rebuild) {
@@ -333,6 +347,24 @@ fn watch_again<W: notify::Watcher>(
 
         std::thread::sleep(CHECK_INTERVAL);
     }
+}
+
+/// True when everything the event names is still there with a write time from
+/// before the watch went on, so nothing has happened to it since.
+///
+/// macOS hands over a file written just before the watch went on as though it
+/// had been written after, and can be a second or more late about it. That
+/// reads as a change nobody made, one line and one refresh into every run.
+///
+/// Worth asking only in the first moments. Later a write time is no judge: a
+/// copy that keeps the times of the files it copies writes new contents with
+/// old times.
+fn from_before_the_watch(event: &DebouncedEvent, watch_went_on: SystemTime) -> bool {
+    event.paths.iter().all(|path| {
+        std::fs::metadata(path)
+            .and_then(|about| about.modified())
+            .is_ok_and(|written| written <= watch_went_on)
+    })
 }
 
 /// True when the browser should refresh.
@@ -796,6 +828,37 @@ mod tests {
         assert!(!replaced_under_the_watch(&Mutex::new(None), &path));
 
         std::fs::remove_dir_all(&path).unwrap();
+    }
+
+    #[test]
+    fn a_file_written_before_the_watch_went_on_is_not_a_change() {
+        let dir = std::env::temp_dir().join(format!("servio-settling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let page = dir.join("index.html");
+        std::fs::write(&page, "<html>before</html>").unwrap();
+
+        let watch_went_on = SystemTime::now();
+        let about_the_page = written(&[page.to_str().unwrap()]);
+        assert!(
+            from_before_the_watch(&about_the_page, watch_went_on),
+            "a file nobody touched was taken for one that changed"
+        );
+
+        // The system stamps a file by a coarser clock than this one, so a
+        // moment's wait keeps the two writes on either side of the moment.
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&page, "<html>after</html>").unwrap();
+        assert!(
+            !from_before_the_watch(&about_the_page, watch_went_on),
+            "a file written since the watch went on is a change"
+        );
+
+        // Gone, so nothing says it was there all along.
+        std::fs::remove_file(&page).unwrap();
+        assert!(!from_before_the_watch(&about_the_page, watch_went_on));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(unix)]
