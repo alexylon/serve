@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-04
+
 ### Fixed
 - A rebuild was announced twice, and the browser refreshed to an error page on
   the way, when the watcher's account of the old directory going reached it
